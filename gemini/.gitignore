@@ -7,6 +7,7 @@ output/static/**
 !output/static/.gitkeep
 work/**
 !work/.gitkeep
+logs/
 node_modules/
 .setup-temp-*/
 .env*
