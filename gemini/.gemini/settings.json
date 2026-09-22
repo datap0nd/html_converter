@@ -1,0 +1,14 @@
+{
+  "tools": {
+    "core": ["glob", "grep_search", "list_directory", "read_file", "read_many_files", "write_file", "replace"]
+  },
+  "mcp": {
+    "allowed": []
+  },
+  "context": {
+    "fileFiltering": {
+      "respectGitIgnore": false,
+      "respectGeminiIgnore": true
+    }
+  }
+}

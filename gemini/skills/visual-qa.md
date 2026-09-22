@@ -1,0 +1,3 @@
+# Visual and functional QA playbook
+
+Compare every PBIR page and visual to the HTML output. For each, check title, visual type, field/measure mapping, units, labels, legend, sort order, position, and accessible fallback. For slicers and filters, check scope, defaults, cross-filter behavior, and reset behavior. Record unsupported interactions rather than silently omitting them. Check mobile/responsive layout, keyboard reachability, errors with empty or special-character data, and the no-data state. An independent reviewer should use original source files as evidence, not trust the builder's notes.

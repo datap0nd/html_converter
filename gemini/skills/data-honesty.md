@@ -1,0 +1,3 @@
+# Data honesty playbook
+
+Only use rows in `input/data/` and the normalized copy at `output/dynamic/report-data.json`. PBIP does not itself guarantee underlying data rows. Never synthesize business numbers. A field name, measure expression, or visual binding is not a row-level dataset. If a visual cannot be populated, display an explicit empty state saying why. Keep missing data, ambiguous joins, unimplemented DAX, and unsupported interactions in a limitations list. Do not connect to external services or issue runtime network requests. Static HTML is a disclosure of all embedded data, not a secure container.

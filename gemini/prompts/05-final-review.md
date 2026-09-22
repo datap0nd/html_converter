@@ -1,0 +1,3 @@
+# Phase 5 — final independent review
+
+Read `skills/visual-qa.md`, `skills/data-honesty.md`, `work/inventory.json`, original PBIR files, `output/dynamic/index.html`, `output/static/report.html`, `work/build-review.json`, and `work/dynamic-checks.json`. Do not edit output in this phase. Check that pages, visuals, local data, filters, limitations, and static/offline behavior are honestly represented. Write valid JSON to `work/final-review.json` with `status` (`pass`, `warnings`, or `blocked`), `findings`, `pageCoverage`, `visualCoverage`, `dataStatus`, and `manualReviewNeeded`. Use `blocked` for fabricated values, broken snapshot, or serious source mismatch. A PBIP-only preview with explicit missing-data labels should be `warnings`, not `pass`.

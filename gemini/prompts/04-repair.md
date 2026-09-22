@@ -1,0 +1,3 @@
+# Phase 4 — independent review and repair
+
+Read `skills/visual-qa.md`, `skills/data-honesty.md`, original PBIR files, `work/interpretation.json`, `output/dynamic/index.html`, `output/dynamic/report-data.json`, and `work/build-notes.json`. Independently compare report definition with output. Fix concrete errors in the dynamic HTML when possible, without inventing data. Preserve the embedded-data placeholder and self-contained HTML contract. Write valid JSON to `work/build-review.json` with `status` (`pass`, `warnings`, or `blocked`), `fixed`, `remaining`, and `coverage`. Missing local data is a warning if honestly labeled; fabricated data or a broken page is blocked.

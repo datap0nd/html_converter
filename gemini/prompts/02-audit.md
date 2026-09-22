@@ -1,0 +1,3 @@
+# Phase 2 — independent interpretation audit
+
+Read `skills/pbir-reading.md`, `skills/data-honesty.md`, original source files under `input/`, `work/inventory.json`, and `work/interpretation.json`. Review as a fresh, skeptical reviewer. Do not trust the prior agent's claims. Do not edit interpretation or output. Write valid JSON to `work/interpretation-review.json` with `status` (`pass`, `warnings`, or `blocked`), `findings` (array of objects with severity, evidence path, and description), and `coverage` (page and visual counts). Use `warnings` for honest missing local data; use `blocked` for source mismatch or fabricated claims. If the interpretation has errors, describe exact corrections for the builder.
