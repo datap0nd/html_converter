@@ -2,16 +2,33 @@ import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import os from 'node:os';
+import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { root, inputDir, workDir, dynamicDir, discover, writeJson, readJson } from './core.mjs';
 import { loadLocalEnv } from './env.mjs';
 import { runGemini, runGeminiAsync } from './gemini.mjs';
+import { inputFingerprint, captureArtifacts, artifactsMatch, saveCheckpoint } from './checkpoints.mjs';
 
 const phases = [
   ['01-interpret', 'prompts/live-01-interpret.md', 'work/live-interpretation.json'],
   ['02-build', 'prompts/live-02-build.md', 'work/live-build.json'],
   ['03-review', 'prompts/live-03-review.md', 'work/live-review.json']
 ];
+
+const phaseArtifacts = {
+  '01-interpret': ['work/live-interpretation.json'],
+  '02-build': ['work/live-build.json', 'output/dynamic/index.html', 'output/dynamic/backend.mjs'],
+  '03-review': ['work/live-review.json'],
+  '05-final-review': ['work/live-final-review.json']
+};
+
+function reportCoverage(inventory, markup) {
+  return inventory.pages.map(page => ({
+    ...page,
+    missingPage: !markup.includes(`data-page-id="${page.id}"`),
+    missingVisuals: page.visuals.filter(visual => !markup.includes(`data-visual-id="${visual.id}"`))
+  }));
+}
 
 function createGeminiWorkspace(inventory) {
   const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'html-converter-gemini-'));
@@ -31,6 +48,10 @@ function createGeminiWorkspace(inventory) {
   });
   writeJson(path.join(stage, 'work', 'inventory.json'), inventory);
   fs.copyFileSync(path.join(workDir, 'live-run.json'), path.join(stage, 'work', 'live-run.json'));
+  for (const rel of ['work/live-interpretation.json', 'work/live-build.json', 'work/live-review.json', 'work/live-final-review.json', 'output/dynamic/index.html', 'output/dynamic/backend.mjs']) {
+    const source = path.join(root, rel);
+    if (fs.existsSync(source)) fs.copyFileSync(source, path.join(stage, rel));
+  }
   return stage;
 }
 
@@ -83,10 +104,12 @@ async function runPhase([name, promptFile, expectedFile], model, runDir, stage, 
   if (result.error || result.status !== 0) throw new Error(`${name}: Gemini failed (${result.error?.message ?? `exit ${result.status}`}). ${geminiFailureDetail(result, env)} Full logs: ${path.relative(root, runDir)}/${name}.stderr.log and .stdout.json.`);
   if (!fs.existsSync(expected) || !readJson(expected)) throw new Error(`${name}: expected valid JSON at ${expectedFile}. See run logs.`);
   fs.copyFileSync(expected, path.join(root, expectedFile));
-  if (name === '02-build') {
+  if (name === '02-build' || name.startsWith('04-page-')) {
+    for (const file of ['index.html', 'backend.mjs']) {
+      if (!fs.existsSync(path.join(stage, 'output', 'dynamic', file))) throw new Error(`${name} did not produce output/dynamic/${file}.`);
+    }
     for (const file of ['index.html', 'backend.mjs']) {
       const source = path.join(stage, 'output', 'dynamic', file);
-      if (!fs.existsSync(source)) throw new Error(`02-build did not produce output/dynamic/${file}.`);
       fs.copyFileSync(source, path.join(dynamicDir, file));
     }
   }
@@ -153,6 +176,34 @@ function startServer(htmlFile, backend, inventory) {
   return server;
 }
 
+function summarizeValidation(issues) {
+  const pages = issues.filter(issue => issue.startsWith('Missing page ')).length;
+  const visuals = issues.filter(issue => issue.startsWith('Missing visual ')).length;
+  const other = issues.filter(issue => !issue.startsWith('Missing page ') && !issue.startsWith('Missing visual '));
+  return [`${pages} missing page(s), ${visuals} missing visual(s)`, ...other.slice(0, 3)].join('; ');
+}
+
+function recordPhase(state, name, paths, stateFile) {
+  const artifacts = captureArtifacts(root, paths);
+  if (!artifacts) throw new Error(`${name} completed but one or more required artifacts are missing.`);
+  state.phases[name] = { completedAt: new Date().toISOString(), artifacts };
+  saveCheckpoint(stateFile, state);
+}
+
+function priorInventoryMatches(previous, current) {
+  return previous?.project === current.project && JSON.stringify(previous) === JSON.stringify(current);
+}
+
+function adoptPriorRun(state, inventory, previousInventory) {
+  if (!priorInventoryMatches(previousInventory, inventory) || !readJson(path.join(workDir, 'live-validation.json'))) return false;
+  let adopted = false;
+  for (const [name, paths] of Object.entries(phaseArtifacts)) {
+    const artifacts = captureArtifacts(root, paths);
+    if (artifacts) { state.phases[name] = { completedAt: null, artifacts, adopted: true }; adopted = true; }
+  }
+  return adopted;
+}
+
 export async function runLiveReport({ preflightOnly = false, invokeGemini = true } = {}) {
   process.chdir(root);
   const env = loadLocalEnv();
@@ -160,32 +211,96 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
   if (!inventory.pages.length || !inventory.pages.some(page => page.visuals.length)) throw new Error('No enhanced PBIR pages/visuals found; cannot verify a generated report against this PBIP format.');
   if (inventory.reportModelReferences.some(x => x.kind === 'remote-connection')) throw new Error('PBIR references a remote semantic model. This no-Fabric workflow requires a local model definition.');
   fs.mkdirSync(workDir, { recursive: true });
+  const previousInventory = readJson(path.join(workDir, 'inventory.json'));
   writeJson(path.join(workDir, 'inventory.json'), inventory);
   console.log(`Found ${inventory.pages.length} page(s), ${inventory.pages.reduce((n, p) => n + p.visuals.length, 0)} visual(s), ${inventory.postgresSources.length} PostgreSQL source(s), ${inventory.directCsvSources.length} direct CSV source(s), and ${inventory.unsupportedConnectors.length} other connector reference(s).`);
   if (preflightOnly) { console.log('PBIP scan passed. No Gemini call or source access made.'); return { inventory }; }
+  const stateFile = path.join(workDir, 'live-state.json');
+  const fingerprint = inputFingerprint(inputDir);
+  let state = readJson(stateFile);
+  const hadState = state !== null;
+  const fresh = process.argv.includes('--fresh');
+  if (fresh || state?.version !== 1 || state?.inputFingerprint !== fingerprint) {
+    state = { version: 1, project: inventory.project, inputFingerprint: fingerprint, createdAt: new Date().toISOString(), phases: {}, repairs: {} };
+    if (!fresh && !hadState && adoptPriorRun(state, inventory, previousInventory)) console.log('Adopted completed artifacts from the previous converter run.');
+    saveCheckpoint(stateFile, state);
+  } else console.log('Resuming saved converter progress for the unchanged PBIP.');
   const runDir = fs.mkdtempSync(path.join(workDir, 'live-run-'));
   const model = env.GEMINI_MODEL?.trim() || 'gemini-3.5-flash';
   writeJson(path.join(workDir, 'live-run.json'), { project: inventory.project, startedAt: new Date().toISOString(), model, runLog: path.relative(root, runDir).replaceAll('\\', '/') });
   const htmlFile = path.join(dynamicDir, 'index.html');
   const backendFile = path.join(dynamicDir, 'backend.mjs');
   fs.mkdirSync(dynamicDir, { recursive: true });
-  for (const [file, name] of [[htmlFile, 'previous-index.html'], [backendFile, 'previous-backend.mjs']]) {
-    if (fs.existsSync(file)) { fs.copyFileSync(file, path.join(runDir, name)); fs.unlinkSync(file); }
-  }
   if (invokeGemini) {
     const version = runGemini(['--version'], { cwd: root, timeout: 15000 });
     if (version.error || version.status !== 0) throw new Error('Gemini CLI not found or not authenticated. Run gemini --version and sign in.');
     const stage = createGeminiWorkspace(inventory);
     try {
-      await runPhase(phases[0], model, runDir, stage, env);
-      await runPhase(phases[1], model, runDir, stage, env);
-      await runPhase(phases[2], model, runDir, stage, env);
+      let upstreamChanged = false;
+      for (const phase of phases) {
+        const [name] = phase;
+        const valid = !upstreamChanged && artifactsMatch(root, state.phases[name]?.artifacts);
+        if (valid) { console.log(`[${name}] Reusing completed artifact.`); continue; }
+        if (name === '02-build') {
+          for (const [file, backup] of [[htmlFile, 'previous-index.html'], [backendFile, 'previous-backend.mjs']]) {
+            if (fs.existsSync(file)) fs.copyFileSync(file, path.join(runDir, backup));
+            const staged = path.join(stage, 'output', 'dynamic', path.basename(file));
+            if (fs.existsSync(staged)) fs.unlinkSync(staged);
+          }
+          state.repairs = {};
+        }
+        await runPhase(phase, model, runDir, stage, env);
+        recordPhase(state, name, phaseArtifacts[name], stateFile);
+        upstreamChanged = true;
+        if (name !== '03-review') delete state.phases['05-final-review'];
+      }
+      let review = readJson(path.join(workDir, 'live-review.json'));
+      let markup = fs.readFileSync(htmlFile, 'utf8');
+      let issues = validateLiveReport(inventory, markup, review, env);
+      writeJson(path.join(workDir, 'live-validation.json'), { passed: issues.length === 0, issues, reviewStatus: review?.status });
+      const incomplete = reportCoverage(inventory, markup).filter(page => page.missingPage || page.missingVisuals.length);
+      if (incomplete.length) {
+        console.log(`Coverage incomplete: ${incomplete.length} page(s) need focused repair. Completed phases will not restart.`);
+        for (const page of incomplete) {
+          const safePageId = /^[A-Za-z0-9_-]+$/.test(page.id) ? page.id : createHash('sha256').update(page.id).digest('hex').slice(0, 16);
+          let batchIndex = 0;
+          for (;;) {
+            markup = fs.readFileSync(htmlFile, 'utf8');
+            const current = reportCoverage({ pages: [page] }, markup)[0];
+            if (!current.missingPage && !current.missingVisuals.length) break;
+            const batch = current.missingVisuals.slice(0, 8);
+            const currentPage = { id: page.id, name: page.name, source: page.source, missingPage: current.missingPage, missingVisuals: batch, remainingVisualCount: current.missingVisuals.length - batch.length, allVisuals: page.visuals };
+            writeJson(path.join(stage, 'work', 'current-page.json'), currentPage);
+            const name = `04-page-${safePageId}-${batchIndex++}`;
+            const artifact = `work/page-repair-${safePageId}-${batchIndex}.json`;
+            console.log(`[${name}] Repairing ${batch.length} visual(s) on ${page.name}; ${currentPage.remainingVisualCount} queued.`);
+            await runPhase([name, 'prompts/live-04-page-repair.md', artifact], model, runDir, stage, env);
+            const repair = readJson(path.join(root, artifact));
+            recordPhase(state, '02-build', phaseArtifacts['02-build'], stateFile);
+            delete state.phases['05-final-review'];
+            saveCheckpoint(stateFile, state);
+            const after = reportCoverage({ pages: [page] }, fs.readFileSync(htmlFile, 'utf8'))[0];
+            const stillMissing = new Set(after.missingVisuals.map(visual => visual.id));
+            if (repair?.status !== 'complete' || after.missingPage || batch.some(visual => stillMissing.has(visual.id))) {
+              throw new Error(`${name} remains incomplete. Progress is saved; the next setup run resumes this page. See ${artifact}.`);
+            }
+            state.repairs[page.id] = { completedAt: new Date().toISOString(), artifact, remainingVisualCount: after.missingVisuals.length };
+            saveCheckpoint(stateFile, state);
+          }
+        }
+      }
+      if (Object.keys(state.repairs).length && !artifactsMatch(root, state.phases['05-final-review']?.artifacts)) {
+        const finalPhase = ['05-final-review', 'prompts/live-05-final-review.md', 'work/live-final-review.json'];
+        await runPhase(finalPhase, model, runDir, stage, env);
+        recordPhase(state, '05-final-review', phaseArtifacts['05-final-review'], stateFile);
+      }
     } finally { removeGeminiWorkspace(stage); }
   }
-  const review = readJson(path.join(workDir, 'live-review.json'));
+  const finalReviewValid = artifactsMatch(root, state.phases['05-final-review']?.artifacts);
+  const review = finalReviewValid ? readJson(path.join(workDir, 'live-final-review.json')) : readJson(path.join(workDir, 'live-review.json'));
   const issues = validateLiveReport(inventory, fs.readFileSync(htmlFile, 'utf8'), review, env);
   writeJson(path.join(workDir, 'live-validation.json'), { passed: issues.length === 0, issues, reviewStatus: review?.status });
-  if (issues.length) throw new Error(`Generated report failed validation: ${issues.join(' ')} See work/live-validation.json and ${path.relative(root, runDir)}.`);
+  if (issues.length) throw new Error(`Generated report failed validation: ${summarizeValidation(issues)}. Progress is saved. See work/live-validation.json and ${path.relative(root, runDir)}.`);
   const backend = await loadBackend(backendFile, env);
   let preflight;
   try { preflight = await checkBackend(backend, inventory); }
@@ -194,7 +309,7 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
     throw error;
   }
   writeJson(path.join(workDir, 'live-preflight.json'), preflight);
-  console.log(`Gemini review: ${review.status}. ${review.limitations.length} limitation(s), ${review.unverified.length} unverified behavior(s). See work/live-review.json.`);
+  console.log(`Gemini review: ${review.status}. ${review.limitations.length} limitation(s), ${review.unverified.length} unverified behavior(s). See work/${finalReviewValid ? 'live-final-review' : 'live-review'}.json.`);
   return { inventory, review, server: startServer(htmlFile, backend, inventory) };
 }
 

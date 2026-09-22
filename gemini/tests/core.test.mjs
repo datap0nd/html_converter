@@ -7,6 +7,7 @@ import { runGemini, runGeminiAsync } from '../scripts/gemini.mjs';
 import { loadAllData, postgresQuery, postgresNativeQuery, listLiveSources, fetchLivePage } from '../scripts/sources.mjs';
 import { createLivePreview } from '../scripts/live-preview.mjs';
 import { validateLiveReport, geminiFailureDetail } from '../scripts/start-live-report.mjs';
+import { inputFingerprint, captureArtifacts, artifactsMatch, saveCheckpoint } from '../scripts/checkpoints.mjs';
 import { exportDesktopModel, modelExportData } from '../scripts/desktop-model.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -276,6 +277,33 @@ test('live report validation requires generated visual coverage, a backend call,
 test('Gemini CLI failure detail surfaces JSON errors while redacting source passwords', () => {
   assert.equal(geminiFailureDetail({ stdout: JSON.stringify({ error: { message: 'Bad password secret-value' } }), stderr: '' }, { PG_PASSWORD: 'secret-value' }), 'Bad password [redacted]');
   assert.equal(geminiFailureDetail({ stdout: 'model unavailable', stderr: '' }), 'model unavailable');
+});
+
+test('converter checkpoints survive restarts and invalidate when PBIP or artifacts change', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'html-converter-test-'));
+  try {
+    const input = path.join(dir, 'input');
+    const work = path.join(dir, 'work');
+    fs.mkdirSync(input);
+    fs.mkdirSync(work);
+    fs.writeFileSync(path.join(input, 'report.pbip'), '{"version":1}');
+    fs.writeFileSync(path.join(work, 'phase.json'), '{"status":"complete"}');
+    const fingerprint = inputFingerprint(input);
+    const artifacts = captureArtifacts(dir, ['work/phase.json']);
+    const stateFile = path.join(work, 'live-state.json');
+    saveCheckpoint(stateFile, { version: 1, inputFingerprint: fingerprint, phases: { phase: { artifacts } } });
+    assert.equal(artifactsMatch(dir, JSON.parse(fs.readFileSync(stateFile, 'utf8')).phases.phase.artifacts), true);
+    saveCheckpoint(stateFile, { version: 1, inputFingerprint: fingerprint, phases: { phase: { artifacts } }, resumed: true });
+    assert.equal(JSON.parse(fs.readFileSync(stateFile, 'utf8')).resumed, true);
+    fs.writeFileSync(path.join(work, 'phase.json'), '{"status":"stale"}');
+    assert.equal(artifactsMatch(dir, artifacts), false);
+    fs.writeFileSync(path.join(input, 'report.pbip'), '{"version":2}');
+    assert.notEqual(inputFingerprint(input), fingerprint);
+  } finally {
+    const resolved = path.resolve(dir);
+    if (path.dirname(resolved) !== path.resolve(os.tmpdir()) || !path.basename(resolved).startsWith('html-converter-test-')) throw new Error('Unsafe test cleanup path');
+    fs.rmSync(resolved, { recursive: true, force: true });
+  }
 });
 
 test('Desktop model export uses DAX Studio result tables without inspecting SQL connectors', async () => {
