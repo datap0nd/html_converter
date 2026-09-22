@@ -4,11 +4,13 @@ import { parseCsv, scriptJson, findDirectCsvSources, findPostgresSources, findRe
 import { createPreview } from '../scripts/preview.mjs';
 import { makeSnapshot } from '../scripts/snapshot.mjs';
 import { runGemini, runGeminiAsync } from '../scripts/gemini.mjs';
-import { loadAllData, postgresQuery, postgresNativeQuery } from '../scripts/sources.mjs';
+import { loadAllData, postgresQuery, postgresNativeQuery, listLiveSources, fetchLivePage } from '../scripts/sources.mjs';
+import { createLivePreview } from '../scripts/live-preview.mjs';
 import { exportDesktopModel, modelExportData } from '../scripts/desktop-model.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
 
 test('CSV handles quoted commas and newlines', () => {
   const data = parseCsv('name,amount\r\n"A, B",12\r\n"Line\none",8\r\n');
@@ -149,6 +151,50 @@ test('native SQL wrapper rejects writes, parameters, and extra statements', () =
   assert.throws(() => postgresNativeQuery('SELECT * FROM sales WHERE id = $1', 10), /Parameterized/);
   assert.throws(() => postgresNativeQuery('SELECT 1; DROP TABLE sales', 10), /only one statement/);
   assert.deepEqual(postgresNativeQuery('SELECT 1;', 10).values, [11]);
+});
+
+test('live PostgreSQL path pages native SQL without embedding credentials or all rows', async () => {
+  const connection = { server: 'dbhost', database: 'analytics', tables: [], nativeQueries: [{ sql: 'with x as (select 1 as value) select value from x', referencedBy: 'input/report.tmdl' }] };
+  const env = { PG_USER: 'reader', PG_PASSWORD: 'private-password', PG_SSL_MODE: 'disable', PG_ALLOW_NATIVE_QUERIES: 'true' };
+  assert.throws(() => listLiveSources({ postgresSources: [connection] }, { ...env, PG_ALLOW_NATIVE_QUERIES: 'false' }), /PG_ALLOW_NATIVE_QUERIES=true/);
+  const [source] = listLiveSources({ postgresSources: [connection] }, env);
+  const statements = [];
+  class FakeClient {
+    constructor(config) { assert.equal(config.password, 'private-password'); }
+    async connect() {}
+    async query(query) {
+      statements.push(query);
+      if (typeof query === 'string') return {};
+      return { rows: [{ value: 1 }, { value: 2 }, { value: 3 }], fields: [{ name: 'value' }] };
+    }
+    async end() {}
+  }
+  const page = await fetchLivePage(source, env, { limit: 2, offset: 200 }, { Client: FakeClient });
+  assert.equal(statements[0], 'BEGIN READ ONLY');
+  assert.match(statements[1].text, /^SELECT \* FROM \(with x as /i);
+  assert.deepEqual(statements[1].values, [3, 200]);
+  assert.equal(statements[2], 'COMMIT');
+  assert.deepEqual(page.rows, [{ value: 1 }, { value: 2 }]);
+  assert.equal(page.hasMore, true);
+  assert.equal(JSON.stringify(page).includes('private-password'), false);
+  await assert.rejects(fetchLivePage(source, env, { limit: 1000 }, { Client: FakeClient }), /1–200/);
+});
+
+test('live preview writes source browser but no credentials or data', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'html-converter-test-'));
+  try {
+    const file = createLivePreview({ project: 'input/Demo.pbip', pages: [{ name: 'Overview', visuals: [{ id: 'v1', type: 'barChart', title: 'Sales' }] }] }, [{ id: 'source-0', name: 'Native query 1' }], dir);
+    const markup = fs.readFileSync(file, 'utf8');
+    assert.match(markup, /\/api\/rows/);
+    assert.match(markup, /Power Query steps after source SQL/);
+    assert.match(markup, /barChart/);
+    assert.doesNotMatch(markup, /PG_PASSWORD|private-password/);
+    new vm.Script(markup.match(/<script>([\s\S]*?)<\/script>/)?.[1] ?? 'syntax error');
+  } finally {
+    const resolved = path.resolve(dir);
+    if (path.dirname(resolved) !== path.resolve(os.tmpdir()) || !path.basename(resolved).startsWith('html-converter-test-')) throw new Error('Unsafe test cleanup path');
+    fs.rmSync(resolved, { recursive: true, force: true });
+  }
 });
 
 test('Desktop model export uses DAX Studio result tables without inspecting SQL connectors', async () => {

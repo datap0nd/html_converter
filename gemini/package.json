@@ -4,8 +4,11 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "start": "node scripts/start.mjs",
-    "preflight": "node scripts/start.mjs --preflight",
+    "start": "node scripts/live.mjs",
+    "live": "node scripts/live.mjs",
+    "convert": "node scripts/start.mjs",
+    "preflight": "node scripts/live.mjs --preflight",
+    "convert-preflight": "node scripts/start.mjs --preflight",
     "preview": "node scripts/serve.mjs",
     "snapshot": "node scripts/refresh-snapshot.mjs",
     "test": "node --test tests/*.test.mjs"

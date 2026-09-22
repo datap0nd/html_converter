@@ -1,0 +1,25 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { dynamicDir, html } from './core.mjs';
+
+export function createLivePreview(inventory, sources, targetDir = dynamicDir) {
+  fs.mkdirSync(targetDir, { recursive: true });
+  const title = path.basename(inventory.project, '.pbip');
+  const pages = inventory.pages.length ? inventory.pages : [{ name: 'Report', visuals: [] }];
+  const markup = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${html(title)} — live source preview</title>
+<style>:root{font-family:Segoe UI,Arial,sans-serif;color:#17233a;background:#f4f6fa}*{box-sizing:border-box}body{margin:0}header{background:#172b4d;color:#fff;padding:22px 28px}h1{margin:0 0 5px;font-size:23px}.notice{padding:13px 28px;background:#fff0c2;border-left:5px solid #c78d00}main{padding:22px 28px}nav{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}button,select{font:inherit;border:1px solid #b9c5d5;border-radius:6px;background:#fff;padding:8px 11px}button:disabled{opacity:.45}.card{background:#fff;border:1px solid #dbe2ed;border-radius:9px;padding:16px;margin:10px 0}.visuals{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}.visuals .card{margin:0;min-height:105px}.muted{color:#637187}table{border-collapse:collapse;font-size:13px;min-width:100%}th,td{border-bottom:1px solid #e1e7ee;padding:7px;text-align:left;white-space:nowrap}.tablewrap{overflow:auto;max-height:65vh}.toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0}#error{color:#9c1b1b}</style></head>
+<body><header><h1>${html(title)}</h1><div>Live PostgreSQL source preview · local server</div></header>
+<div class="notice">Data is queried live from PostgreSQL. This is not yet a Power BI-equivalent report: Power Query steps after source SQL, relationships, DAX measures, and visual filters still need reconstruction and validation.</div>
+<main><nav aria-label="Report pages">${pages.map((p, i) => `<button type="button" data-page="${i}">${html(p.name)}</button>`).join('')}</nav>
+${pages.map((p, i) => `<section class="report-page" data-page="${i}" ${i ? 'hidden' : ''}><h2>${html(p.name)}</h2><div class="visuals">${p.visuals.length ? p.visuals.map(v => `<article class="card"><small>${html(v.type)}</small><h3>${html(v.title ?? v.id)}</h3><p class="muted">Visual mapping pending.</p></article>`).join('') : '<div class="card">No PBIR visuals found.</div>'}</div></section>`).join('')}
+<section class="card"><h2>Live source data</h2><p class="muted">Showing at most 100 rows per request. This table browser is for source validation, not report-level filters.</p><div class="toolbar"><label>Source <select id="source">${sources.map(s => `<option value="${html(s.id)}">${html(s.name)}</option>`).join('')}</select></label><button id="refresh" type="button">Refresh</button><button id="previous" type="button">Previous</button><button id="next" type="button">Next</button><span id="range"></span></div><p id="error" role="alert"></p><div id="table" class="tablewrap">Loading…</div></section></main>
+<script>
+const source=document.getElementById('source'),table=document.getElementById('table'),error=document.getElementById('error'),range=document.getElementById('range'),previous=document.getElementById('previous'),next=document.getElementById('next');let offset=0,hasMore=false,busy=false;
+const escapeHtml=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function load(){if(busy)return;busy=true;error.textContent='';table.textContent='Querying PostgreSQL…';previous.disabled=next.disabled=true;try{const response=await fetch('/api/rows?source='+encodeURIComponent(source.value)+'&offset='+offset,{cache:'no-store'});if(!response.ok)throw new Error((await response.json()).error||'HTTP '+response.status);const data=await response.json();hasMore=data.hasMore;range.textContent=data.rows.length?('Rows '+(offset+1)+'–'+(offset+data.rows.length)):'No rows';table.innerHTML='<table><thead><tr>'+data.columns.map(c=>'<th>'+escapeHtml(c)+'</th>').join('')+'</tr></thead><tbody>'+data.rows.map(row=>'<tr>'+data.columns.map(c=>'<td>'+escapeHtml(row[c])+'</td>').join('')+'</tr>').join('')+'</tbody></table>';previous.disabled=offset===0;next.disabled=!hasMore}catch(e){table.textContent='';error.textContent=e.message}finally{busy=false}}
+source.addEventListener('change',()=>{offset=0;load()});document.getElementById('refresh').addEventListener('click',load);previous.addEventListener('click',()=>{offset=Math.max(0,offset-100);load()});next.addEventListener('click',()=>{if(hasMore){offset+=100;load()}});document.querySelectorAll('nav button').forEach(button=>button.addEventListener('click',()=>{document.querySelectorAll('.report-page').forEach(page=>page.hidden=page.dataset.page!==button.dataset.page)}));load();
+</script></body></html>`;
+  fs.writeFileSync(path.join(targetDir, 'index.html'), markup);
+  return path.join(targetDir, 'index.html');
+}

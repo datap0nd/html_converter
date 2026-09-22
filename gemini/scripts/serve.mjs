@@ -28,7 +28,7 @@ http.createServer(async (req, res) => {
     return;
   }
   const file = path.join(dynamicDir, entry[0]);
-  if (!fs.existsSync(file)) { res.writeHead(404); res.end('Run npm start first'); return; }
+  if (!fs.existsSync(file)) { res.writeHead(404); res.end('Run npm run convert first'); return; }
   res.writeHead(200, { 'Content-Type': entry[1], 'Cache-Control': 'no-store' });
   fs.createReadStream(file).pipe(res);
 }).listen(8765, '127.0.0.1', () => console.log('Dynamic review: http://127.0.0.1:8765/ (Ctrl+C to stop)'));

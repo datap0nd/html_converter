@@ -43,6 +43,49 @@ function connectionConfig(source, env) {
   };
 }
 
+export function listLiveSources(inventory, env = {}) {
+  if (inventory.unsupportedConnectors?.length) {
+    throw new Error(`Unsupported connector(s): ${[...new Set(inventory.unsupportedConnectors.map(x => x.connector))].join(', ')}. A live run cannot silently omit them.`);
+  }
+  const sources = [];
+  for (const connection of inventory.postgresSources ?? []) {
+    if (connection.hasUnresolvedNativeQuery) throw new Error(`Cannot safely parse a native query in ${connection.server}/${connection.database}.`);
+    for (const table of connection.tables) sources.push({ id: `source-${sources.length}`, name: `${table.schema}.${table.item}`, type: 'table', connection, table });
+    for (const [index, query] of (connection.nativeQueries ?? []).entries()) {
+      if (env.PG_ALLOW_NATIVE_QUERIES !== 'true') throw new Error('PBIP contains native PostgreSQL SQL. Review it and set PG_ALLOW_NATIVE_QUERIES=true in gemini/.env.');
+      postgresNativeQuery(query.sql, 1);
+      sources.push({ id: `source-${sources.length}`, name: `Native query ${index + 1}`, type: 'native', connection, query });
+    }
+  }
+  if (!sources.length) throw new Error('No supported PostgreSQL table or literal native query found in the PBIP. This live path currently supports PostgreSQL only.');
+  return sources;
+}
+
+export async function fetchLivePage(source, env = {}, { limit = 100, offset = 0 } = {}, options = {}) {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) throw new Error('Live page limit must be 1–200.');
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100000000) throw new Error('Invalid live page offset.');
+  let Client = options.Client;
+  if (!Client) {
+    try { Client = (await import('pg')).default.Client; }
+    catch { throw new Error('PostgreSQL driver missing. Run npm install in gemini/.'); }
+  }
+  const client = new Client(connectionConfig(source.connection, env));
+  try {
+    await client.connect();
+    await client.query('BEGIN READ ONLY');
+    const base = source.type === 'table'
+      ? `${quoteIdentifier(source.table.schema)}.${quoteIdentifier(source.table.item)}`
+      : `(${source.query.sql.trim().replace(/;\s*$/, '').trim()}) AS html_converter_source`;
+    const result = await client.query({ text: `SELECT * FROM ${base} LIMIT $1 OFFSET $2`, values: [limit + 1, offset] });
+    await client.query('COMMIT');
+    const rows = JSON.parse(JSON.stringify(result.rows.slice(0, limit), (_key, value) => typeof value === 'bigint' ? value.toString() : value));
+    return { id: source.id, name: source.name, columns: result.fields.map(x => x.name), rows, offset, limit, hasMore: result.rows.length > limit, fidelity: 'raw-source-not-power-query-or-dax' };
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch {}
+    throw new Error(`Live PostgreSQL read failed for ${source.name}: ${error.message}`);
+  } finally { try { await client.end(); } catch {} }
+}
+
 export async function loadAllData(inventory, env = {}, options = {}) {
   if (inventory.unsupportedConnectors?.length) {
     const names = [...new Set(inventory.unsupportedConnectors.map(x => x.connector))].join(', ');

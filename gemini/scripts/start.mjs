@@ -76,10 +76,10 @@ try {
       throw new Error(`Unsupported source connector(s): ${names}. This run stopped rather than silently omit their data. See work/inventory.json after using npm run preflight, or provide approved exports in input/data and remove the unsupported model source.`);
     }
     if (inventory.directCsvSources?.some(x => !x.available)) {
-      throw new Error('A PBIP-referenced CSV path is not readable on this PC. Check work/inventory.json, network/VPN access, and the account running npm start.');
+      throw new Error('A PBIP-referenced CSV path is not readable on this PC. Check work/inventory.json, network/VPN access, and the account running npm run convert.');
     }
     if (inventory.postgresSources?.length && (!env.PG_USER || !env.PG_PASSWORD)) {
-      throw new Error('PostgreSQL source found. Fill PG_USER and PG_PASSWORD in gemini/.env with a read-only login, then rerun npm start.');
+      throw new Error('PostgreSQL source found. Fill PG_USER and PG_PASSWORD in gemini/.env with a read-only login, then rerun npm run convert.');
     }
     ensurePostgresDriver(inventory);
     data = await loadAllData(inventory, env);
