@@ -40,6 +40,17 @@ function removeGeminiWorkspace(stage) {
   fs.rmSync(resolved, { recursive: true, force: true });
 }
 
+export function geminiFailureDetail(result, env = {}) {
+  let parsed;
+  try { parsed = JSON.parse(result.stdout ?? ''); } catch {}
+  const message = parsed?.error?.message || parsed?.error?.details || result.stderr?.trim() || result.stdout?.trim() || result.error?.message || 'No diagnostic text from Gemini CLI.';
+  let detail = typeof message === 'string' ? message : JSON.stringify(message);
+  for (const [key, value] of Object.entries(env)) {
+    if (/(PASSWORD|SECRET|TOKEN|API_KEY|CONNECTION_STRING)/i.test(key) && typeof value === 'string' && value.length > 3) detail = detail.replaceAll(value, '[redacted]');
+  }
+  return detail.slice(-1800);
+}
+
 export function validateLiveReport(inventory, markup, review, env = {}) {
   const issues = [];
   if (!/<html\b/i.test(markup) || !/<script\b/i.test(markup)) issues.push('Generated HTML is not an interactive report.');
@@ -59,17 +70,17 @@ export function validateLiveReport(inventory, markup, review, env = {}) {
   return issues;
 }
 
-async function runPhase([name, promptFile, expectedFile], model, runDir, stage) {
+async function runPhase([name, promptFile, expectedFile], model, runDir, stage, env) {
   const expected = path.join(stage, expectedFile);
   if (fs.existsSync(expected)) fs.unlinkSync(expected);
   console.log(`[${name}] Gemini ${model} starting...`);
   const prompt = `Read ${promptFile}, work/live-run.json, work/inventory.json, and the relevant PBIP files. Follow the phase instructions exactly. Do not read .env or run shell commands. Write ${expectedFile}.`;
-  const result = await runGeminiAsync(['--model', model, '-e', 'none', '--approval-mode', 'auto_edit', '--output-format', 'json', '-p', prompt], {
+  const result = await runGeminiAsync(['--model', model, '--skip-trust', '-e', 'none', '--approval-mode', 'auto_edit', '--output-format', 'json', '-p', prompt], {
     cwd: stage, onHeartbeat: message => console.log(`[${name}] ${message}`)
   });
   fs.writeFileSync(path.join(runDir, `${name}.stdout.json`), result.stdout ?? '');
   fs.writeFileSync(path.join(runDir, `${name}.stderr.log`), result.stderr ?? '');
-  if (result.error || result.status !== 0) throw new Error(`${name}: Gemini failed (${result.error?.message ?? `exit ${result.status}`}). See ${path.relative(root, runDir)}/${name}.stderr.log.`);
+  if (result.error || result.status !== 0) throw new Error(`${name}: Gemini failed (${result.error?.message ?? `exit ${result.status}`}). ${geminiFailureDetail(result, env)} Full logs: ${path.relative(root, runDir)}/${name}.stderr.log and .stdout.json.`);
   if (!fs.existsSync(expected) || !readJson(expected)) throw new Error(`${name}: expected valid JSON at ${expectedFile}. See run logs.`);
   fs.copyFileSync(expected, path.join(root, expectedFile));
   if (name === '02-build') {
@@ -166,9 +177,9 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
     if (version.error || version.status !== 0) throw new Error('Gemini CLI not found or not authenticated. Run gemini --version and sign in.');
     const stage = createGeminiWorkspace(inventory);
     try {
-      await runPhase(phases[0], model, runDir, stage);
-      await runPhase(phases[1], model, runDir, stage);
-      await runPhase(phases[2], model, runDir, stage);
+      await runPhase(phases[0], model, runDir, stage, env);
+      await runPhase(phases[1], model, runDir, stage, env);
+      await runPhase(phases[2], model, runDir, stage, env);
     } finally { removeGeminiWorkspace(stage); }
   }
   const review = readJson(path.join(workDir, 'live-review.json'));

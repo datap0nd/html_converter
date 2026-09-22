@@ -6,7 +6,7 @@ import { makeSnapshot } from '../scripts/snapshot.mjs';
 import { runGemini, runGeminiAsync } from '../scripts/gemini.mjs';
 import { loadAllData, postgresQuery, postgresNativeQuery, listLiveSources, fetchLivePage } from '../scripts/sources.mjs';
 import { createLivePreview } from '../scripts/live-preview.mjs';
-import { validateLiveReport } from '../scripts/start-live-report.mjs';
+import { validateLiveReport, geminiFailureDetail } from '../scripts/start-live-report.mjs';
 import { exportDesktopModel, modelExportData } from '../scripts/desktop-model.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -252,6 +252,11 @@ test('live report validation requires generated visual coverage, a backend call,
   assert.match(validateLiveReport(inventory, valid.replace('visual-a', 'missing'), review).join(' '), /Missing visual/);
   assert.match(validateLiveReport(inventory, valid + 'secret-password', review, { PG_PASSWORD: 'secret-password' }).join(' '), /contains PG_PASSWORD/);
   assert.match(validateLiveReport(inventory, valid, { ...review, status: 'blocked' }).join(' '), /did not approve/);
+});
+
+test('Gemini CLI failure detail surfaces JSON errors while redacting source passwords', () => {
+  assert.equal(geminiFailureDetail({ stdout: JSON.stringify({ error: { message: 'Bad password secret-value' } }), stderr: '' }, { PG_PASSWORD: 'secret-value' }), 'Bad password [redacted]');
+  assert.equal(geminiFailureDetail({ stdout: 'model unavailable', stderr: '' }), 'model unavailable');
 });
 
 test('Desktop model export uses DAX Studio result tables without inspecting SQL connectors', async () => {
