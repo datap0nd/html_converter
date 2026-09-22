@@ -61,6 +61,25 @@ test('Windows Gemini launcher passes arguments without shell:true warning', { sk
   }
 });
 
+test('Windows npm Gemini launcher bypasses cmd and preserves complex prompt arguments', { skip: process.platform !== 'win32' }, () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'html-converter-test-'));
+  try {
+    const packageDir = path.join(dir, 'node_modules', '@google', 'gemini-cli');
+    fs.mkdirSync(path.join(packageDir, 'dist'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'gemini.cmd'), '@echo off\r\nexit /b 9\r\n');
+    fs.writeFileSync(path.join(packageDir, 'package.json'), JSON.stringify({ bin: { gemini: 'dist/index.mjs' } }));
+    fs.writeFileSync(path.join(packageDir, 'dist', 'index.mjs'), 'process.stdout.write(JSON.stringify(process.argv.slice(2)))');
+    const args = ['--model', 'gemini-3.5-flash', '--skip-trust', '-p', 'Read "file" (and keep $1 & #date)'];
+    const result = runGemini(args, { cwd: dir, env: { PATH: dir + path.delimiter + process.env.PATH } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), args);
+  } finally {
+    const resolved = path.resolve(dir);
+    if (path.dirname(resolved) !== path.resolve(os.tmpdir()) || !path.basename(resolved).startsWith('html-converter-test-')) throw new Error('Unsafe test cleanup path');
+    fs.rmSync(resolved, { recursive: true, force: true });
+  }
+});
+
 test('Windows asynchronous Gemini launcher returns phase output', { skip: process.platform !== 'win32' }, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'html-converter-test-'));
   try {

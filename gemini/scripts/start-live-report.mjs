@@ -48,7 +48,7 @@ export function geminiFailureDetail(result, env = {}) {
   for (const [key, value] of Object.entries(env)) {
     if (/(PASSWORD|SECRET|TOKEN|API_KEY|CONNECTION_STRING)/i.test(key) && typeof value === 'string' && value.length > 3) detail = detail.replaceAll(value, '[redacted]');
   }
-  return detail.slice(-1800);
+  return detail.length > 1800 ? `${detail.slice(0, 900)}\n... [truncated] ...\n${detail.slice(-900)}` : detail;
 }
 
 export function validateLiveReport(inventory, markup, review, env = {}) {

@@ -1,4 +1,24 @@
 import { spawn, spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+
+function npmGeminiEntry(env) {
+  const searchPath = env.PATH || env.Path || env.path || '';
+  for (const directory of searchPath.split(path.delimiter).filter(Boolean)) {
+    const shim = path.join(directory, 'gemini.cmd');
+    if (!fs.existsSync(shim)) continue;
+    const packageDir = path.join(directory, 'node_modules', '@google', 'gemini-cli');
+    const packageFile = path.join(packageDir, 'package.json');
+    if (!fs.existsSync(packageFile)) continue;
+    try {
+      const bin = JSON.parse(fs.readFileSync(packageFile, 'utf8')).bin?.gemini;
+      if (typeof bin !== 'string') continue;
+      const entry = path.resolve(packageDir, bin);
+      if (entry.startsWith(path.resolve(packageDir) + path.sep) && fs.existsSync(entry)) return entry;
+    } catch { /* This is not the standard npm Gemini CLI install. */ }
+  }
+  return null;
+}
 
 function invocation(args, options = {}) {
   const childEnv = { ...process.env, NO_COLOR: '1', ...options.env };
@@ -15,6 +35,8 @@ function invocation(args, options = {}) {
     env: childEnv
   };
   if (process.platform !== 'win32') return { command: 'gemini', args, common };
+  const entry = npmGeminiEntry(childEnv);
+  if (entry) return { command: process.execPath, args: [entry, ...args], common };
   // npm installs Gemini CLI as gemini.cmd on Windows. Invoke cmd explicitly;
   // Node 22+/24 deprecates passing an args array with shell:true.
   const encoded = args.map(value => {
