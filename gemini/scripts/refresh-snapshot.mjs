@@ -8,7 +8,7 @@ import { makeSnapshot } from './snapshot.mjs';
 try {
   const env = loadLocalEnv();
   const inventory = discover();
-  const data = (env.DATA_MODE || 'desktop') === 'desktop' ? exportDesktopModel(inventory, env).data : await loadAllData(inventory, env);
+  const data = (env.DATA_MODE || 'desktop') === 'desktop' ? (await exportDesktopModel(inventory, env, { onProgress: message => console.log(`[desktop] ${message}`) })).data : await loadAllData(inventory, env);
   writeJson(path.join(dynamicDir, 'report-data.json'), data);
   const target = makeSnapshot();
   console.log(`Refreshed ${target} from ${data.datasets.length} dataset(s).`);

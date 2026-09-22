@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { root, workDir, dynamicDir, staticDir, discover, writeJson, readJson } from './core.mjs';
-import { runGemini } from './gemini.mjs';
+import { runGemini, runGeminiAsync } from './gemini.mjs';
 import { loadLocalEnv } from './env.mjs';
 import { loadAllData } from './sources.mjs';
 import { ensurePostgresDriver } from './deps.mjs';
@@ -17,10 +17,10 @@ const geminiModel = process.env.GEMINI_MODEL?.trim() || 'gemini-3.5-flash';
 
 function fail(message) { throw new Error(message); }
 
-function runPhase(name, promptFile, expectedFile, runDir) {
+async function runPhase(name, promptFile, expectedFile, runDir) {
   console.log(`\n[${name}] Starting fresh Gemini session...`);
   const prompt = `Read GEMINI.md and ${promptFile}. Follow that phase exactly. Read work/current-run.json. Write the required artifact. Do not run shell commands.`;
-  const result = runGemini(['--model', geminiModel, '-e', 'none', '--approval-mode', 'auto_edit', '--output-format', 'json', '-p', prompt], { cwd: root });
+  const result = await runGeminiAsync(['--model', geminiModel, '-e', 'none', '--approval-mode', 'auto_edit', '--output-format', 'json', '-p', prompt], { cwd: root, onHeartbeat: message => console.log(`[${name}] ${message}`) });
   fs.writeFileSync(path.join(runDir, `${name}.stdout.json`), result.stdout ?? '');
   fs.writeFileSync(path.join(runDir, `${name}.stderr.log`), result.stderr ?? '');
   if (result.error) fail(`${name}: ${result.error.message}`);
@@ -52,15 +52,17 @@ function backupExisting(runDir) {
 
 try {
   const env = loadLocalEnv();
+  console.log('Scanning the PBIP project...');
   const inventory = discover();
   fs.mkdirSync(workDir, { recursive: true });
   writeJson(path.join(workDir, 'inventory.json'), inventory);
   const dataMode = env.DATA_MODE || 'desktop';
   if (!['desktop', 'raw'].includes(dataMode)) throw new Error('DATA_MODE must be desktop or raw.');
+  console.log(`Data mode: ${dataMode}`);
   let data;
   if (dataMode === 'desktop') {
     if (inventory.reportModelReferences.some(x => x.kind !== 'local-path')) throw new Error('This PBIR does not clearly reference a local semantic model byPath. Desktop export might contact a remote model, contrary to the no-Fabric requirement. Supply a PBIP with a local semantic model.');
-    const exported = exportDesktopModel(inventory, env);
+    const exported = await exportDesktopModel(inventory, env, { onProgress: message => console.log(`[desktop] ${message}`) });
     data = exported.data;
     inventory.dataMode = 'desktop-model-export';
     inventory.modelExportFiles = exported.files;
@@ -89,7 +91,8 @@ try {
   inventory.warnings.forEach(x => console.warn(`Warning: ${x}`));
   if (preflightOnly) { console.log('Preflight passed. No Gemini call made.'); process.exit(0); }
 
-  const version = runGemini(['--version'], { cwd: root });
+  console.log('Checking Gemini CLI...');
+  const version = runGemini(['--version'], { cwd: root, timeout: 15000 });
   if (version.error || version.status !== 0) fail('Gemini CLI not found or unusable. Install/authenticate it, then rerun. Try: gemini --version');
   const runDir = path.join(workDir, 'runs', timestamp);
   fs.mkdirSync(runDir, { recursive: true });
@@ -97,13 +100,13 @@ try {
   writeJson(path.join(workDir, 'current-run.json'), { startedAt: new Date().toISOString(), project: inventory.project, runLog: path.relative(root, runDir).replaceAll('\\', '/'), dataStatus: dataMode === 'desktop' ? 'Desktop model tables exported — Power Query applied; verify DAX measures and visual parity' : data.datasets.length ? 'raw source rows loaded — verify Power Query and DAX parity' : 'metadata only — do not invent values' });
   createPreview(inventory, data);
 
-  runPhase('01-interpret', 'prompts/01-interpret.md', 'work/interpretation.json', runDir);
-  runPhase('02-audit', 'prompts/02-audit.md', 'work/interpretation-review.json', runDir);
+  await runPhase('01-interpret', 'prompts/01-interpret.md', 'work/interpretation.json', runDir);
+  await runPhase('02-audit', 'prompts/02-audit.md', 'work/interpretation-review.json', runDir);
   const interpretationReview = readJson(path.join(workDir, 'interpretation-review.json'));
   if (!interpretationReview || !['pass', 'warnings'].includes(interpretationReview.status)) fail('Interpretation audit blocked or invalid. See work/interpretation-review.json');
 
-  runPhase('03-build', 'prompts/03-build.md', 'work/build-notes.json', runDir);
-  runPhase('04-repair', 'prompts/04-repair.md', 'work/build-review.json', runDir);
+  await runPhase('03-build', 'prompts/03-build.md', 'work/build-notes.json', runDir);
+  await runPhase('04-repair', 'prompts/04-repair.md', 'work/build-review.json', runDir);
   const buildReview = readJson(path.join(workDir, 'build-review.json'));
   if (!buildReview || !['pass', 'warnings'].includes(buildReview.status)) fail('Build review blocked or invalid. See work/build-review.json');
   const dynamicChecks = validate();
@@ -111,7 +114,7 @@ try {
 
   const snapshot = makeSnapshot();
   console.log(`Snapshot: ${path.relative(root, snapshot)}`);
-  runPhase('05-final-review', 'prompts/05-final-review.md', 'work/final-review.json', runDir);
+  await runPhase('05-final-review', 'prompts/05-final-review.md', 'work/final-review.json', runDir);
   const finalChecks = validate({ final: true });
   if (!finalChecks.passed) fail(`Final checks failed: ${finalChecks.issues.join('; ')}`);
   console.log('\nDone. Review output/dynamic/index.html, output/static/report.html, and work/final-review.json.');

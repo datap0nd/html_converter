@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { parseCsv, scriptJson, findDirectCsvSources, findPostgresSources, findReportModelReferences, loadData } from '../scripts/core.mjs';
 import { createPreview } from '../scripts/preview.mjs';
 import { makeSnapshot } from '../scripts/snapshot.mjs';
-import { runGemini } from '../scripts/gemini.mjs';
+import { runGemini, runGeminiAsync } from '../scripts/gemini.mjs';
 import { loadAllData, postgresQuery, postgresNativeQuery } from '../scripts/sources.mjs';
 import { exportDesktopModel, modelExportData } from '../scripts/desktop-model.mjs';
 import fs from 'node:fs';
@@ -51,6 +51,20 @@ test('Windows Gemini launcher passes arguments without shell:true warning', { sk
     assert.equal(result.status, 0);
     assert.match(result.stdout, /Read GEMINI\.md/);
     assert.doesNotMatch(result.stderr, /Passing args.*shell/i);
+  } finally {
+    const resolved = path.resolve(dir);
+    if (path.dirname(resolved) !== path.resolve(os.tmpdir()) || !path.basename(resolved).startsWith('html-converter-test-')) throw new Error('Unsafe test cleanup path');
+    fs.rmSync(resolved, { recursive: true, force: true });
+  }
+});
+
+test('Windows asynchronous Gemini launcher returns phase output', { skip: process.platform !== 'win32' }, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'html-converter-test-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'gemini.cmd'), '@echo off\r\necho ready\r\n');
+    const result = await runGeminiAsync(['--version'], { cwd: dir, env: { PATH: dir + path.delimiter + process.env.PATH } });
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /ready/);
   } finally {
     const resolved = path.resolve(dir);
     if (path.dirname(resolved) !== path.resolve(os.tmpdir()) || !path.basename(resolved).startsWith('html-converter-test-')) throw new Error('Unsafe test cleanup path');
@@ -137,7 +151,7 @@ test('native SQL wrapper rejects writes, parameters, and extra statements', () =
   assert.deepEqual(postgresNativeQuery('SELECT 1;', 10).values, [11]);
 });
 
-test('Desktop model export uses DAX Studio result tables without inspecting SQL connectors', () => {
+test('Desktop model export uses DAX Studio result tables without inspecting SQL connectors', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'html-converter-test-'));
   try {
     const pbipPath = path.join(dir, 'Example.pbip');
@@ -148,7 +162,7 @@ test('Desktop model export uses DAX Studio result tables without inspecting SQL 
       fs.writeFileSync(path.join(args[2], 'Sales.csv'), 'Region,Amount\nNorth,42\n');
       return { status: 0, stdout: '', stderr: '' };
     };
-    const result = exportDesktopModel({ project: 'input/Example.pbip' }, {}, { run, pbipPath, workDir: dir });
+    const result = await exportDesktopModel({ project: 'input/Example.pbip' }, {}, { run, pbipPath, workDir: dir });
     assert.equal(calls.length, 1);
     assert.deepEqual(calls[0].args.slice(0, 2), ['export', 'csv']);
     assert.deepEqual(calls[0].args.slice(-2), ['--server', 'Example.pbip']);
@@ -162,14 +176,14 @@ test('Desktop model export uses DAX Studio result tables without inspecting SQL 
   }
 });
 
-test('remote PBIR semantic-model references are rejected for no-Fabric Desktop mode', () => {
+test('remote PBIR semantic-model references are rejected for no-Fabric Desktop mode', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'html-converter-test-'));
   try {
     const pbir = path.join(dir, 'definition.pbir');
     fs.writeFileSync(pbir, JSON.stringify({ datasetReference: { byConnection: { connectionString: 'remote' } } }));
     const references = findReportModelReferences([pbir]);
     assert.equal(references[0].kind, 'remote-connection');
-    assert.throws(() => exportDesktopModel({ project: 'input/Example.pbip', reportModelReferences: references }, {}, { run() {} }), /does not clearly reference a local semantic model/);
+    await assert.rejects(exportDesktopModel({ project: 'input/Example.pbip', reportModelReferences: references }, {}, { run() {} }), /does not clearly reference a local semantic model/);
   } finally {
     const resolved = path.resolve(dir);
     if (path.dirname(resolved) !== path.resolve(os.tmpdir()) || !path.basename(resolved).startsWith('html-converter-test-')) throw new Error('Unsafe test cleanup path');
