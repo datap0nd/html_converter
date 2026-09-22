@@ -63,7 +63,7 @@ try {
     $latestLog = (Get-Content -LiteralPath (Join-Path $installed 'logs/latest.txt') -Raw).Trim()
     if (-not (Test-Path -LiteralPath $latestLog)) { throw 'Persistent setup log missing.' }
     $logText = Get-Content -LiteralPath $latestLog -Raw
-    if ($logText -notmatch 'Starting the live HTML converter' -or $logText -notmatch 'Setup finished successfully') { throw 'Setup log lacks execution outcome.' }
+    if ($logText -notmatch 'Starting Gemini report reconstruction' -or $logText -notmatch 'Setup finished successfully') { throw 'Setup log lacks execution outcome.' }
 
     $env:HC_SETUP_INSTALL_DEPS = '0'
     try {

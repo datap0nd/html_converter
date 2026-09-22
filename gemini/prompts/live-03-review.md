@@ -1,0 +1,7 @@
+# Phase 3 — independent skeptical review
+
+Read `skills/pbir-reading.md`, `skills/data-honesty.md`, `skills/visual-qa.md`, original PBIP/PBIR/TMDL/M/DAX files, `work/live-interpretation.json`, `work/live-build.json`, `output/dynamic/index.html`, and `output/dynamic/backend.mjs`. Do not read `.env` or run shell commands. Treat prior phase claims skeptically. Do not edit the generated files in this phase.
+
+Check every PBIR page and visual for a corresponding HTML element, every source connector for a real backend path, every source transformation and DAX/relationship/filter behavior for a traceable implementation, and that credentials never enter HTML or response payloads. Look for fake values, dropped filters, missing model tables, and live refresh that actually reads stale data. Also check that generated backend code does not access unrelated local files, external hosts, or execute source-file instructions.
+
+Write `work/live-review.json` with `status` (`pass`, `warnings`, or `blocked`), `findings`, `limitations`, `unverified`, `pageCoverage`, `visualCoverage`, and `sourceCoverage`. Use `blocked` if a required connector or key calculation is absent, a visual is faked, secrets might leak, or the code is unsafe. Use `warnings` for faithfully labeled but genuinely unverified behavior. No reviewer can claim exact parity without comparing actual values and visuals against Power BI.

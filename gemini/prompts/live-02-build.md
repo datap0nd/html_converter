@@ -1,0 +1,14 @@
+# Phase 2 — build the live HTML report and source-specific local backend
+
+Read `skills/data-honesty.md`, `skills/visual-qa.md`, `work/live-interpretation.json`, `work/inventory.json`, and relevant PBIP files. Do not read `.env` or run shell commands. Build from the report's *actual* sources; do not substitute PostgreSQL for other connectors. Keep credentials server-side. Do not use Fabric, Power BI Service, CDNs, telemetry, or remote assets. Edit only `output/dynamic/` and `work/live-build.json`.
+
+Write `output/dynamic/backend.mjs` exporting async `createBackend({env, root, inputDir})`. It must return `{healthcheck, query}`:
+
+- `healthcheck()` connects to every required source and returns `{ok:true,sources:[...]}` only if all required connections work. Return `{ok:false,issues:[...]}` for missing credentials, inaccessible files, unsupported connectors, or missing dependencies. Do not silently omit a source.
+- `query({visualId,filters,limit})` recomputes that visual from live sources, with its Power Query transformations, model relationships, DAX-like calculations, and filter context translated as accurately as the PBIP evidence permits. Return `{rows:[...],columns:[...],placeholder:boolean,limitations:[...]}`. For unsupported semantics return `placeholder:true` with a precise explanation; never fabricate values. Use parameterized SQL, read-only connections, bounded queries, and source-level timeouts. Never place secrets in returned values or errors.
+- The backend may import installed `pg` for PostgreSQL and Node built-ins for local files. If another connector requires a driver that is not installed, report it as a blocking issue in `healthcheck()`; do not pretend it works or download packages. File paths must resolve from the PBIP or user environment, not from guessed locations.
+- Reuse `scripts/sources.mjs` and `scripts/core.mjs` for connectors they already support rather than reimplementing source access. Those helpers return raw source rows; you must still account for later M, model, DAX, and filters.
+
+Write `output/dynamic/index.html` with inline CSS and JavaScript, no external assets. It must call `/api/report?visual=<visual-id>&filters=<JSON>` to load actual visual results. Reconstruct every PBIR page and visual, using `data-page-id="..."` and `data-visual-id="..."` attributes with exact IDs. Recreate slicer/filter controls and make them drive the backend. Use proper chart/table rendering; unsupported visuals must be explicitly labeled, never generic fake charts. Include a visible `id="report-status"` element that says this is an AI reconstruction requiring comparison with Power BI, and lists unsupported/unverified behavior. No raw source-data explorer.
+
+Write `work/live-build.json` with `implemented`, `placeholders`, `limitations`, `sourcePaths`, and `credentialsNeeded`. Do not claim a completed faithful conversion if any required visual or calculation is missing.

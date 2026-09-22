@@ -6,6 +6,7 @@ import { makeSnapshot } from '../scripts/snapshot.mjs';
 import { runGemini, runGeminiAsync } from '../scripts/gemini.mjs';
 import { loadAllData, postgresQuery, postgresNativeQuery, listLiveSources, fetchLivePage } from '../scripts/sources.mjs';
 import { createLivePreview } from '../scripts/live-preview.mjs';
+import { validateLiveReport } from '../scripts/start-live-report.mjs';
 import { exportDesktopModel, modelExportData } from '../scripts/desktop-model.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -241,6 +242,16 @@ test('live preview writes source browser but no credentials or data', () => {
     if (path.dirname(resolved) !== path.resolve(os.tmpdir()) || !path.basename(resolved).startsWith('html-converter-test-')) throw new Error('Unsafe test cleanup path');
     fs.rmSync(resolved, { recursive: true, force: true });
   }
+});
+
+test('live report validation requires generated visual coverage, a backend call, and no embedded secret', () => {
+  const inventory = { pages: [{ id: 'page-a', visuals: [{ id: 'visual-a' }] }] };
+  const review = { status: 'warnings', limitations: [], unverified: ['Power BI parity'] };
+  const valid = '<html><div id="report-status"></div><section data-page-id="page-a"><article data-visual-id="visual-a"></article></section><script>fetch("/api/report?visual=visual-a")</script></html>';
+  assert.deepEqual(validateLiveReport(inventory, valid, review, { PG_PASSWORD: 'secret-password' }), []);
+  assert.match(validateLiveReport(inventory, valid.replace('visual-a', 'missing'), review).join(' '), /Missing visual/);
+  assert.match(validateLiveReport(inventory, valid + 'secret-password', review, { PG_PASSWORD: 'secret-password' }).join(' '), /contains PG_PASSWORD/);
+  assert.match(validateLiveReport(inventory, valid, { ...review, status: 'blocked' }).join(' '), /did not approve/);
 });
 
 test('Desktop model export uses DAX Studio result tables without inspecting SQL connectors', async () => {

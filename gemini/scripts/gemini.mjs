@@ -2,7 +2,11 @@ import { spawn, spawnSync } from 'node:child_process';
 
 function invocation(args, options = {}) {
   const childEnv = { ...process.env, NO_COLOR: '1', ...options.env };
-  for (const key of Object.keys(childEnv)) if (/^PG_(?:PASSWORD|USER|HOST|DATABASE|SSL_CA_FILE)$/.test(key)) delete childEnv[key];
+  // The model may need its own auth key, but must never inherit source credentials.
+  for (const key of Object.keys(childEnv)) {
+    if (/^(GEMINI_API_KEY|GOOGLE_API_KEY)$/.test(key)) continue;
+    if (/^(PG_|SQL_|MYSQL_|ORACLE_|ODBC_|SOURCE_|AWS_|AZURE_)/.test(key) || /(PASSWORD|SECRET|TOKEN|CREDENTIAL|CONNECTION_STRING|API_KEY)/i.test(key)) delete childEnv[key];
+  }
   const common = {
     cwd: options.cwd,
     encoding: 'utf8',

@@ -180,7 +180,7 @@ try {
     if ($NoRun) {
         Write-Host 'Update complete. Run .\setup.ps1 to update and start, or npm start to start now.' -ForegroundColor Green
     } else {
-        Write-Host 'Starting the live HTML converter (Ctrl+C to stop)...' -ForegroundColor Green
+        Write-Host 'Starting Gemini report reconstruction and live HTML server (Ctrl+C to stop)...' -ForegroundColor Green
         Push-Location $GeminiDir
         try {
             & npm.cmd start
