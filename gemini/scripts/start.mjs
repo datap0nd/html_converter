@@ -5,6 +5,7 @@ import { runGemini } from './gemini.mjs';
 import { loadLocalEnv } from './env.mjs';
 import { loadAllData } from './sources.mjs';
 import { ensurePostgresDriver } from './deps.mjs';
+import { exportDesktopModel } from './desktop-model.mjs';
 import { createPreview } from './preview.mjs';
 import { makeSnapshot } from './snapshot.mjs';
 import { validate } from './validate.mjs';
@@ -54,18 +55,35 @@ try {
   const inventory = discover();
   fs.mkdirSync(workDir, { recursive: true });
   writeJson(path.join(workDir, 'inventory.json'), inventory);
-  if (inventory.unsupportedConnectors?.length) {
-    const names = [...new Set(inventory.unsupportedConnectors.map(x => x.connector))].join(', ');
-    throw new Error(`Unsupported source connector(s): ${names}. This run stopped rather than silently omit their data. See work/inventory.json after using npm run preflight, or provide approved exports in input/data and remove the unsupported model source.`);
+  const dataMode = env.DATA_MODE || 'desktop';
+  if (!['desktop', 'raw'].includes(dataMode)) throw new Error('DATA_MODE must be desktop or raw.');
+  let data;
+  if (dataMode === 'desktop') {
+    if (inventory.reportModelReferences.some(x => x.kind !== 'local-path')) throw new Error('This PBIR does not clearly reference a local semantic model byPath. Desktop export might contact a remote model, contrary to the no-Fabric requirement. Supply a PBIP with a local semantic model.');
+    const exported = exportDesktopModel(inventory, env);
+    data = exported.data;
+    inventory.dataMode = 'desktop-model-export';
+    inventory.modelExportFiles = exported.files;
+    inventory.warnings = [
+      'Data was exported from the loaded Power BI Desktop model, including Power Query transformations and calculated columns. Import-mode data is only as fresh as the last Desktop refresh.',
+      'DAX measures, RLS behavior, custom visuals, and interactive report logic still require reconstruction and validation.'
+    ];
+  } else {
+    if (inventory.unsupportedConnectors?.length) {
+      const names = [...new Set(inventory.unsupportedConnectors.map(x => x.connector))].join(', ');
+      throw new Error(`Unsupported source connector(s): ${names}. This run stopped rather than silently omit their data. See work/inventory.json after using npm run preflight, or provide approved exports in input/data and remove the unsupported model source.`);
+    }
+    if (inventory.directCsvSources?.some(x => !x.available)) {
+      throw new Error('A PBIP-referenced CSV path is not readable on this PC. Check work/inventory.json, network/VPN access, and the account running npm start.');
+    }
+    if (inventory.postgresSources?.length && (!env.PG_USER || !env.PG_PASSWORD)) {
+      throw new Error('PostgreSQL source found. Fill PG_USER and PG_PASSWORD in gemini/.env with a read-only login, then rerun npm start.');
+    }
+    ensurePostgresDriver(inventory);
+    data = await loadAllData(inventory, env);
+    inventory.dataMode = 'raw-direct-source';
   }
-  if (inventory.directCsvSources?.some(x => !x.available)) {
-    throw new Error('A PBIP-referenced CSV path is not readable on this PC. Check work/inventory.json, network/VPN access, and the account running npm start.');
-  }
-  if (inventory.postgresSources?.length && (!env.PG_USER || !env.PG_PASSWORD)) {
-    throw new Error('PostgreSQL source found. Fill PG_USER and PG_PASSWORD in gemini/.env with a read-only login, then rerun npm start.');
-  }
-  ensurePostgresDriver(inventory);
-  const data = await loadAllData(inventory, env);
+  writeJson(path.join(workDir, 'inventory.json'), inventory);
   console.log(`Project: ${inventory.project}`);
   console.log(`PBIR pages: ${inventory.pages.length}; visuals: ${inventory.pages.reduce((n, p) => n + p.visuals.length, 0)}; local datasets: ${data.datasets.length}`);
   inventory.warnings.forEach(x => console.warn(`Warning: ${x}`));
@@ -76,7 +94,7 @@ try {
   const runDir = path.join(workDir, 'runs', timestamp);
   fs.mkdirSync(runDir, { recursive: true });
   backupExisting(runDir);
-  writeJson(path.join(workDir, 'current-run.json'), { startedAt: new Date().toISOString(), project: inventory.project, runLog: path.relative(root, runDir).replaceAll('\\', '/'), dataStatus: data.datasets.length ? 'source rows loaded — verify Power Query and DAX parity' : 'metadata only — do not invent values' });
+  writeJson(path.join(workDir, 'current-run.json'), { startedAt: new Date().toISOString(), project: inventory.project, runLog: path.relative(root, runDir).replaceAll('\\', '/'), dataStatus: dataMode === 'desktop' ? 'Desktop model tables exported — Power Query applied; verify DAX measures and visual parity' : data.datasets.length ? 'raw source rows loaded — verify Power Query and DAX parity' : 'metadata only — do not invent values' });
   createPreview(inventory, data);
 
   runPhase('01-interpret', 'prompts/01-interpret.md', 'work/interpretation.json', runDir);

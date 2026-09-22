@@ -16,6 +16,14 @@ export function postgresQuery(schema, table, limit) {
   return { text: `SELECT * FROM ${quoteIdentifier(schema)}.${quoteIdentifier(table)} LIMIT $1`, values: [limit + 1] };
 }
 
+export function postgresNativeQuery(sql, limit) {
+  const statement = sql.trim().replace(/;\s*$/, '').trim();
+  if (!/^(?:select|with)\b/i.test(statement)) throw new Error('Native PostgreSQL query must start with SELECT or WITH.');
+  if (statement.includes(';')) throw new Error('Native PostgreSQL query must contain only one statement.');
+  if (/\$\d+\b/.test(statement)) throw new Error('Parameterized native PostgreSQL queries are not supported.');
+  return { text: `SELECT * FROM (${statement}) AS html_converter_source LIMIT $1`, values: [limit + 1] };
+}
+
 function connectionConfig(source, env) {
   if (!env.PG_USER || !env.PG_PASSWORD) throw new Error('PostgreSQL source found. Fill PG_USER and PG_PASSWORD in gemini/.env with a read-only login.');
   const server = env.PG_HOST || source.server;
@@ -51,8 +59,9 @@ export async function loadAllData(inventory, env = {}, options = {}) {
   }
   const limit = positiveLimit(env.PG_MAX_ROWS);
   for (const source of sources) {
-    if (source.hasNativeQuery) throw new Error(`PostgreSQL source ${source.server}/${source.database} uses a native query. It is not auto-executed; provide a reviewed export or a supported table/view mapping.`);
-    if (!source.tables.length) throw new Error(`PostgreSQL source ${source.server}/${source.database} has no simple table/view navigation. Native queries or parameterized paths are not auto-run; provide a supported mapping or export.`);
+    if (source.hasUnresolvedNativeQuery) throw new Error(`PostgreSQL source ${source.server}/${source.database} has a native query that cannot be parsed as literal SQL with null parameters. It was not run.`);
+    if (!source.tables.length && !source.nativeQueries?.length) throw new Error(`PostgreSQL source ${source.server}/${source.database} has no readable table/view navigation or supported literal native query.`);
+    if (source.nativeQueries?.length && env.PG_ALLOW_NATIVE_QUERIES !== 'true') throw new Error(`PostgreSQL source ${source.server}/${source.database} uses native SQL. Review it, then set PG_ALLOW_NATIVE_QUERIES=true in gemini/.env to run it using a read-only login. Later Power Query steps are still not applied.`);
     const client = new Client(connectionConfig(source, env));
     try {
       await client.connect();
@@ -64,6 +73,15 @@ export async function loadAllData(inventory, env = {}, options = {}) {
         data.datasets.push({
           name: `${table.schema}.${table.item}`, source: `PostgreSQL ${table.schema}.${table.item}`,
           kind: 'raw-postgres-source', columns: result.fields.map(x => x.name), rows
+        });
+      }
+      for (const [index, query] of (source.nativeQueries ?? []).entries()) {
+        const result = await client.query(postgresNativeQuery(query.sql, limit));
+        if (result.rows.length > limit) throw new Error(`PostgreSQL native query ${index + 1} exceeds PG_MAX_ROWS=${limit}; stopped instead of producing an incomplete snapshot.`);
+        const rows = JSON.parse(JSON.stringify(result.rows, (_key, value) => typeof value === 'bigint' ? value.toString() : value));
+        data.datasets.push({
+          name: `Native query ${index + 1}`, source: `PostgreSQL native query in ${query.referencedBy}`,
+          kind: 'raw-postgres-native-query', columns: result.fields.map(x => x.name), rows
         });
       }
       await client.query('COMMIT');

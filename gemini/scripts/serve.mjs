@@ -4,6 +4,7 @@ import path from 'node:path';
 import { dynamicDir, discover } from './core.mjs';
 import { loadLocalEnv } from './env.mjs';
 import { loadAllData } from './sources.mjs';
+import { exportDesktopModel } from './desktop-model.mjs';
 
 const files = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
@@ -15,7 +16,9 @@ http.createServer(async (req, res) => {
   if (!entry) { res.writeHead(404); res.end('Not found'); return; }
   if (entry[0] === 'report-data.json') {
     try {
-      const data = await loadAllData(discover(), loadLocalEnv());
+      const env = loadLocalEnv();
+      const inventory = discover();
+      const data = (env.DATA_MODE || 'desktop') === 'desktop' ? exportDesktopModel(inventory, env).data : await loadAllData(inventory, env);
       res.writeHead(200, { 'Content-Type': entry[1], 'Cache-Control': 'no-store' });
       res.end(JSON.stringify(data));
     } catch (error) {

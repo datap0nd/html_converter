@@ -89,21 +89,33 @@ export function findPostgresSources(files) {
   const found = new Map();
   const quote = '"((?:[^\"]|\"\")*)"';
   const databaseCall = new RegExp(`PostgreSQL\\.Database\\s*\\(\\s*${quote}\\s*,\\s*${quote}`, 'gi');
+  const nativeCall = new RegExp(`Value\\.NativeQuery\\s*\\(\\s*PostgreSQL\\.Database\\s*\\(\\s*${quote}\\s*,\\s*${quote}\\s*\\)\\s*,\\s*${quote}\\s*,\\s*null\\s*(?:,|\\))`, 'gi');
+  const unquote = value => value.replaceAll('""', '"');
   for (const file of modelSourceFiles(files)) {
     for (const sourceText of mTextSources(file)) {
+      const nativeByConnection = new Map();
+      for (const match of sourceText.matchAll(nativeCall)) {
+        const key = `${unquote(match[1])}\0${unquote(match[2])}`;
+        const sql = unquote(match[3]).replace(/#\((lf|cr|tab)\)/gi, (_escape, name) => ({ lf: '\n', cr: '\r', tab: '\t' })[name.toLowerCase()]);
+        const queries = nativeByConnection.get(key) ?? [];
+        queries.push({ sql, referencedBy: relative(file) });
+        nativeByConnection.set(key, queries);
+      }
       for (const match of sourceText.matchAll(databaseCall)) {
-        const server = match[1].replaceAll('""', '"');
-        const database = match[2].replaceAll('""', '"');
+        const server = unquote(match[1]);
+        const database = unquote(match[2]);
         const tail = sourceText.slice(match.index + match[0].length);
         const tables = [];
         for (const nav of tail.matchAll(/\[\s*Schema\s*=\s*"((?:[^"]|"")*)"\s*,\s*Item\s*=\s*"((?:[^"]|"")*)"\s*\]/gi)) {
-          tables.push({ schema: nav[1].replaceAll('""', '"'), item: nav[2].replaceAll('""', '"') });
+          tables.push({ schema: unquote(nav[1]), item: unquote(nav[2]) });
         }
-        const hasNativeQuery = /\bQuery\s*=\s*"|Value\.NativeQuery\s*\(/i.test(tail);
         const key = `${server}\0${database}`;
-        const existing = found.get(key) ?? { server, database, tables: [], hasNativeQuery: false, referencedBy: [] };
+        const existing = found.get(key) ?? { server, database, tables: [], nativeQueries: [], hasUnresolvedNativeQuery: false, referencedBy: [] };
         for (const table of tables) if (!existing.tables.some(x => x.schema === table.schema && x.item === table.item)) existing.tables.push(table);
-        existing.hasNativeQuery ||= hasNativeQuery;
+        for (const query of nativeByConnection.get(key) ?? []) {
+          if (!existing.nativeQueries.some(x => x.sql === query.sql)) existing.nativeQueries.push(query);
+        }
+        existing.hasUnresolvedNativeQuery ||= /Value\.NativeQuery\s*\(/i.test(sourceText) && !existing.nativeQueries.length;
         if (!existing.referencedBy.includes(relative(file))) existing.referencedBy.push(relative(file));
         found.set(key, existing);
       }
@@ -147,6 +159,23 @@ export function findUnsupportedConnectors(files) {
   return found;
 }
 
+export function findReportModelReferences(pbirFiles) {
+  return pbirFiles.map(file => {
+    const reference = readJson(file)?.datasetReference;
+    let kind = 'unknown';
+    if (reference?.byConnection) kind = 'remote-connection';
+    else if (typeof reference?.byPath?.path === 'string') {
+      const target = path.resolve(path.dirname(file), reference.byPath.path);
+      const insideInput = target.toLowerCase().startsWith((path.resolve(inputDir) + path.sep).toLowerCase());
+      kind = insideInput && fs.existsSync(target) && fs.statSync(target).isDirectory() ? 'local-path' : 'missing-local-path';
+    }
+    return {
+      report: relative(file),
+      kind
+    };
+  });
+}
+
 export function discover() {
   const files = walk(inputDir);
   const pbip = files.filter(f => f.toLowerCase().endsWith('.pbip'));
@@ -182,20 +211,24 @@ export function discover() {
   const directCsvSources = findDirectCsvSources(files);
   const postgresSources = findPostgresSources(files);
   const unsupportedConnectors = findUnsupportedConnectors(files);
-  const availableDataCount = dataFiles.length + directCsvSources.filter(x => x.available).length + postgresSources.reduce((n, x) => n + x.tables.length, 0);
+  const reportModelReferences = findReportModelReferences(pbir);
+  const availableDataCount = dataFiles.length + directCsvSources.filter(x => x.available).length + postgresSources.reduce((n, x) => n + x.tables.length + x.nativeQueries.length, 0);
   return {
     project: relative(pbip[0]), reportDefinitions: pbir.map(relative),
     pages, dataFiles: dataFiles.map(f => ({ path: relative(f), bytes: fs.statSync(f).size })),
     directCsvSources,
     postgresSources,
     unsupportedConnectors,
+    reportModelReferences,
     sourceFileCount: files.length,
     warnings: [
       ...(availableDataCount ? [] : ['No readable local CSV/JSON exports or direct File.Contents CSV sources found. Output can only be a metadata/layout preview.']),
       ...directCsvSources.filter(x => !x.available).map(x => `CSV source not readable: ${x.path} (${x.error}).`),
       ...(directCsvSources.some(x => x.available) ? ['Direct CSV source rows are raw; Power Query transformations and DAX have not been executed.'] : []),
       ...(postgresSources.length ? ['PostgreSQL sources found. A read-only login and npm install are required; raw tables/views do not include Power Query or DAX results.'] : []),
-      ...postgresSources.filter(x => !x.tables.length).map(x => `PostgreSQL source ${x.server}/${x.database} has no simple schema/table navigation to read; native or parameterized queries need a supported mapping.`),
+      ...postgresSources.filter(x => x.hasUnresolvedNativeQuery).map(x => `PostgreSQL source ${x.server}/${x.database} has a native query the parser cannot safely resolve; use a literal query with null parameters or provide a reviewed export.`),
+      ...postgresSources.filter(x => x.nativeQueries.length).map(x => `PostgreSQL native query found for ${x.server}/${x.database}; explicit PG_ALLOW_NATIVE_QUERIES=true is required. Power Query steps after SQL, merges, and DAX are not applied automatically.`),
+      ...postgresSources.filter(x => !x.tables.length && !x.nativeQueries.length && !x.hasUnresolvedNativeQuery).map(x => `PostgreSQL source ${x.server}/${x.database} has no simple schema/table navigation to read.`),
       ...unsupportedConnectors.map(x => `Unsupported connector ${x.connector} in ${x.referencedBy}; this run will not access it.`),
       ...(pages.length ? [] : ['No enhanced PBIR page.json files found. Legacy report.json requires agent interpretation.'])
     ]
