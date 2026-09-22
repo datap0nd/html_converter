@@ -1,12 +1,14 @@
 # html_converter — live first
 
-Put one complete PBIP project (`*.pbip` plus its `.Report` and `.SemanticModel` folders) in `input/`. From this `gemini/` directory:
+Put one complete PBIP project (`*.pbip` plus its `.Report` and `.SemanticModel` folders) in `input/`. From this `gemini/` directory, use the updater/launcher:
 
 ```powershell
-npm start
+.\setup.ps1
 ```
 
-On first run, the tool creates `.env`. Fill `PG_USER` and `PG_PASSWORD` with a **read-only PostgreSQL login**. If the PBIP contains `Value.NativeQuery`, inspect that query and set `PG_ALLOW_NATIVE_QUERIES=true`. Then rerun `npm start` and open `http://127.0.0.1:8765/`. Node.js 20+ and access to your PostgreSQL server are required. The PostgreSQL driver is installed automatically once if missing; if your proxy prevents this, run `npm install` yourself. `npm run preflight` tests each detected source with a one-row query and does not invoke Gemini.
+`setup.ps1` downloads the newest GitHub version into `gemini/`, installs Node dependencies only when needed, and runs `npm start`. Stop any previous converter server with Ctrl+C, then run setup again whenever you want to update and launch. It uses the same GitHub API/archive/codeload fallback pattern as the data-governance installer, with Edge as a last download fallback. It merges code without deleting files and preserves `.env`, `input/`, `output/`, `work/`, and `node_modules/`. It does not require Administrator. If all automatic downloads are blocked, obtain a repo ZIP through an approved route and run `.\setup.ps1 -ArchivePath C:\path\to\html_converter.zip`. For update only, use `-NoRun`.
+
+On first run, the tool creates `.env` and may stop for credentials. Fill `PG_USER` and `PG_PASSWORD` with a **read-only PostgreSQL login**. If the PBIP contains `Value.NativeQuery`, inspect that query and set `PG_ALLOW_NATIVE_QUERIES=true`. Then rerun `.\setup.ps1` and open `http://127.0.0.1:8765/`. Node.js 20+ and access to your PostgreSQL server are required. `npm run preflight` tests each detected source with a one-row query and does not invoke Gemini. You can run `npm start` directly after setup when you do not need to check for updates.
 
 The live page is written to `output/dynamic/index.html`, but **open it through the local server**, not as a `file://` page. The browser requests 100 rows at a time from a local Node server. The server reads `.env`, connects to PostgreSQL, and sends only the requested page of results. Passwords are never embedded in HTML or sent to the browser. Refresh queries the source again. This path does not require Power BI Desktop, DAX Studio, Fabric, or a full model export, so it avoids the previous 253 MB JSON/string-size failure.
 

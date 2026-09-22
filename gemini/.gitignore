@@ -8,6 +8,7 @@ output/static/**
 work/**
 !work/.gitkeep
 node_modules/
+.setup-temp-*/
 .env*
 !.env.example
 *.log
