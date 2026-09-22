@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
+import os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { root, inputDir, workDir, dynamicDir, discover, writeJson, readJson } from './core.mjs';
 import { loadLocalEnv } from './env.mjs';
@@ -11,6 +12,33 @@ const phases = [
   ['02-build', 'prompts/live-02-build.md', 'work/live-build.json'],
   ['03-review', 'prompts/live-03-review.md', 'work/live-review.json']
 ];
+
+function createGeminiWorkspace(inventory) {
+  const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'html-converter-gemini-'));
+  for (const folder of ['input', 'work', 'prompts', 'skills', 'scripts', 'output/dynamic']) fs.mkdirSync(path.join(stage, folder), { recursive: true });
+  for (const name of ['GEMINI.md']) fs.copyFileSync(path.join(root, name), path.join(stage, name));
+  for (const folder of ['prompts', 'skills']) fs.cpSync(path.join(root, folder), path.join(stage, folder), { recursive: true });
+  for (const name of ['core.mjs', 'sources.mjs']) fs.copyFileSync(path.join(root, 'scripts', name), path.join(stage, 'scripts', name));
+  fs.cpSync(inputDir, path.join(stage, 'input'), {
+    recursive: true,
+    filter: source => {
+      const rel = path.relative(inputDir, source).replaceAll('\\', '/');
+      if (!rel) return true;
+      if (fs.lstatSync(source).isSymbolicLink()) return false;
+      if (/^data(?:\/|$)/i.test(rel)) return false;
+      return fs.statSync(source).isDirectory() || /\.(?:pbip|pbir|tmdl|m|pq|bim|json)$/i.test(rel);
+    }
+  });
+  writeJson(path.join(stage, 'work', 'inventory.json'), inventory);
+  fs.copyFileSync(path.join(workDir, 'live-run.json'), path.join(stage, 'work', 'live-run.json'));
+  return stage;
+}
+
+function removeGeminiWorkspace(stage) {
+  const resolved = path.resolve(stage);
+  if (path.dirname(resolved) !== path.resolve(os.tmpdir()) || !path.basename(resolved).startsWith('html-converter-gemini-')) throw new Error('Unsafe Gemini workspace cleanup path.');
+  fs.rmSync(resolved, { recursive: true, force: true });
+}
 
 export function validateLiveReport(inventory, markup, review, env = {}) {
   const issues = [];
@@ -31,18 +59,26 @@ export function validateLiveReport(inventory, markup, review, env = {}) {
   return issues;
 }
 
-async function runPhase([name, promptFile, expectedFile], model, runDir) {
-  const expected = path.join(root, expectedFile);
+async function runPhase([name, promptFile, expectedFile], model, runDir, stage) {
+  const expected = path.join(stage, expectedFile);
   if (fs.existsSync(expected)) fs.unlinkSync(expected);
   console.log(`[${name}] Gemini ${model} starting...`);
   const prompt = `Read ${promptFile}, work/live-run.json, work/inventory.json, and the relevant PBIP files. Follow the phase instructions exactly. Do not read .env or run shell commands. Write ${expectedFile}.`;
   const result = await runGeminiAsync(['--model', model, '-e', 'none', '--approval-mode', 'auto_edit', '--output-format', 'json', '-p', prompt], {
-    cwd: root, onHeartbeat: message => console.log(`[${name}] ${message}`)
+    cwd: stage, onHeartbeat: message => console.log(`[${name}] ${message}`)
   });
   fs.writeFileSync(path.join(runDir, `${name}.stdout.json`), result.stdout ?? '');
   fs.writeFileSync(path.join(runDir, `${name}.stderr.log`), result.stderr ?? '');
   if (result.error || result.status !== 0) throw new Error(`${name}: Gemini failed (${result.error?.message ?? `exit ${result.status}`}). See ${path.relative(root, runDir)}/${name}.stderr.log.`);
   if (!fs.existsSync(expected) || !readJson(expected)) throw new Error(`${name}: expected valid JSON at ${expectedFile}. See run logs.`);
+  fs.copyFileSync(expected, path.join(root, expectedFile));
+  if (name === '02-build') {
+    for (const file of ['index.html', 'backend.mjs']) {
+      const source = path.join(stage, 'output', 'dynamic', file);
+      if (!fs.existsSync(source)) throw new Error(`02-build did not produce output/dynamic/${file}.`);
+      fs.copyFileSync(source, path.join(dynamicDir, file));
+    }
+  }
   console.log(`[${name}] Complete.`);
 }
 
@@ -128,9 +164,12 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
   if (invokeGemini) {
     const version = runGemini(['--version'], { cwd: root, timeout: 15000 });
     if (version.error || version.status !== 0) throw new Error('Gemini CLI not found or not authenticated. Run gemini --version and sign in.');
-    await runPhase(phases[0], model, runDir);
-    await runPhase(phases[1], model, runDir);
-    await runPhase(phases[2], model, runDir);
+    const stage = createGeminiWorkspace(inventory);
+    try {
+      await runPhase(phases[0], model, runDir, stage);
+      await runPhase(phases[1], model, runDir, stage);
+      await runPhase(phases[2], model, runDir, stage);
+    } finally { removeGeminiWorkspace(stage); }
   }
   const review = readJson(path.join(workDir, 'live-review.json'));
   const issues = validateLiveReport(inventory, fs.readFileSync(htmlFile, 'utf8'), review, env);
