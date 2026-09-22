@@ -63,6 +63,45 @@ export function parseCsv(content) {
   return { columns, rows: rows.map(cells => Object.fromEntries(columns.map((name, i) => [name, cells[i] ?? '']))) };
 }
 
+function mTextSources(file) {
+  if (!/\.bim$/i.test(file)) return [fs.readFileSync(file, 'utf8')];
+  const model = readJson(file);
+  if (!model) return [];
+  const found = [];
+  function visit(value) {
+    if (typeof value === 'string') { if (value.includes('File.Contents')) found.push(value); }
+    else if (Array.isArray(value)) value.forEach(visit);
+    else if (value && typeof value === 'object') Object.values(value).forEach(visit);
+  }
+  visit(model);
+  return found;
+}
+
+export function findDirectCsvSources(files) {
+  const found = new Map();
+  for (const file of files.filter(f => /\.(tmdl|m|pq|bim)$/i.test(f))) {
+    for (const sourceText of mTextSources(file)) {
+      const matches = sourceText.matchAll(/File\.Contents\s*\(\s*"((?:[^"]|"")*)"\s*\)/gi);
+      for (const match of matches) {
+        const sourcePath = match[1].replaceAll('""', '"');
+        if (!/\.csv$/i.test(sourcePath)) continue;
+        if (!path.isAbsolute(sourcePath) && !path.win32.isAbsolute(sourcePath)) continue;
+        const key = process.platform === 'win32' ? sourcePath.toLowerCase() : sourcePath;
+        if (found.has(key)) continue;
+        let available = false, bytes = null, error = null;
+        try {
+          const stat = fs.statSync(sourcePath);
+          available = stat.isFile();
+          bytes = available ? stat.size : null;
+          if (!available) error = 'Not a file';
+        } catch (e) { error = e.code ?? e.message; }
+        found.set(key, { path: sourcePath, referencedBy: relative(file), available, bytes, error, kind: 'raw-file-source' });
+      }
+    }
+  }
+  return [...found.values()];
+}
+
 export function discover() {
   const files = walk(inputDir);
   const pbip = files.filter(f => f.toLowerCase().endsWith('.pbip'));
@@ -95,27 +134,36 @@ export function discover() {
     const rel = relative(f).toLowerCase();
     return rel.startsWith('input/data/') && /\.(csv|json)$/.test(rel);
   });
+  const directCsvSources = findDirectCsvSources(files);
+  const availableDataCount = dataFiles.length + directCsvSources.filter(x => x.available).length;
   return {
     project: relative(pbip[0]), reportDefinitions: pbir.map(relative),
     pages, dataFiles: dataFiles.map(f => ({ path: relative(f), bytes: fs.statSync(f).size })),
+    directCsvSources,
     sourceFileCount: files.length,
     warnings: [
-      ...(dataFiles.length ? [] : ['No local CSV/JSON data supplied. Output can only be a metadata/layout preview.']),
+      ...(availableDataCount ? [] : ['No readable local CSV/JSON exports or direct File.Contents CSV sources found. Output can only be a metadata/layout preview.']),
+      ...directCsvSources.filter(x => !x.available).map(x => `CSV source not readable: ${x.path} (${x.error}).`),
+      ...(directCsvSources.some(x => x.available) ? ['Direct CSV source rows are raw; Power Query transformations and DAX have not been executed.'] : []),
       ...(pages.length ? [] : ['No enhanced PBIR page.json files found. Legacy report.json requires agent interpretation.'])
     ]
   };
 }
 
 export function loadData(inventory) {
-  return { datasets: inventory.dataFiles.map(info => {
-    const file = path.join(root, info.path);
+  const sources = [
+    ...inventory.dataFiles.map(info => ({ file: path.join(root, info.path), source: info.path, kind: 'local-export' })),
+    ...(inventory.directCsvSources ?? []).filter(info => info.available).map(info => ({ file: info.path, source: path.basename(info.path), kind: 'raw-file-source' }))
+  ];
+  return { datasets: sources.map(info => {
+    const file = info.file;
     const name = path.basename(file, path.extname(file));
-    if (file.toLowerCase().endsWith('.csv')) return { name, source: info.path, ...parseCsv(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')) };
+    if (file.toLowerCase().endsWith('.csv')) return { name, source: info.source, kind: info.kind, ...parseCsv(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')) };
     const parsed = readJson(file);
-    if (parsed === null) throw new Error(`Invalid JSON: ${info.path}`);
+    if (parsed === null) throw new Error(`Invalid JSON: ${info.source}`);
     const rows = Array.isArray(parsed) ? parsed : Array.isArray(parsed.rows) ? parsed.rows : null;
-    if (!rows) throw new Error(`JSON must be an array or have a rows array: ${info.path}`);
+    if (!rows) throw new Error(`JSON must be an array or have a rows array: ${info.source}`);
     const columns = [...new Set(rows.flatMap(x => x && typeof x === 'object' && !Array.isArray(x) ? Object.keys(x) : []))];
-    return { name, source: info.path, columns, rows };
+    return { name, source: info.source, kind: info.kind, columns, rows };
   }) };
 }

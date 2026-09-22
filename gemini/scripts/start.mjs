@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
 import { root, workDir, dynamicDir, staticDir, discover, loadData, writeJson, readJson } from './core.mjs';
+import { runGemini } from './gemini.mjs';
 import { createPreview } from './preview.mjs';
 import { makeSnapshot } from './snapshot.mjs';
 import { validate } from './validate.mjs';
@@ -9,29 +9,21 @@ import { validate } from './validate.mjs';
 process.chdir(root);
 const preflightOnly = process.argv.includes('--preflight');
 const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+const geminiModel = process.env.GEMINI_MODEL?.trim() || 'gemini-3.5-flash';
 
 function fail(message) { throw new Error(message); }
-
-function gemini(args) {
-  // Arguments are fixed repository strings, not source-file content.
-  return spawnSync('gemini', args, {
-    cwd: root,
-    encoding: 'utf8',
-    shell: process.platform === 'win32',
-    timeout: 20 * 60 * 1000,
-    maxBuffer: 50 * 1024 * 1024,
-    env: { ...process.env, NO_COLOR: '1' }
-  });
-}
 
 function runPhase(name, promptFile, expectedFile, runDir) {
   console.log(`\n[${name}] Starting fresh Gemini session...`);
   const prompt = `Read GEMINI.md and ${promptFile}. Follow that phase exactly. Read work/current-run.json. Write the required artifact. Do not run shell commands.`;
-  const result = gemini(['--model', 'gemini-3.5-flash', '-e', 'none', '--approval-mode', 'auto_edit', '--output-format', 'json', '-p', prompt]);
+  const result = runGemini(['--model', geminiModel, '-e', 'none', '--approval-mode', 'auto_edit', '--output-format', 'json', '-p', prompt], { cwd: root });
   fs.writeFileSync(path.join(runDir, `${name}.stdout.json`), result.stdout ?? '');
   fs.writeFileSync(path.join(runDir, `${name}.stderr.log`), result.stderr ?? '');
   if (result.error) fail(`${name}: ${result.error.message}`);
-  if (result.status !== 0) fail(`${name}: Gemini exited ${result.status}. Check work/runs/${path.basename(runDir)}/${name}.stderr.log`);
+  if (result.status !== 0) {
+    const detail = (result.stderr || result.stdout || '').trim().slice(-1500);
+    fail(`${name}: Gemini exited ${result.status}. ${detail || 'No error text returned.'} Full log: work/runs/${path.basename(runDir)}/${name}.stderr.log`);
+  }
   const parsed = (() => { try { return JSON.parse(result.stdout); } catch { return null; } })();
   if (parsed?.error) fail(`${name}: Gemini reported ${JSON.stringify(parsed.error)}`);
   if (!fs.existsSync(path.join(root, expectedFile))) fail(`${name}: missing required ${expectedFile}. See work/runs/${path.basename(runDir)}/${name}.stdout.json`);
@@ -64,7 +56,7 @@ try {
   inventory.warnings.forEach(x => console.warn(`Warning: ${x}`));
   if (preflightOnly) { console.log('Preflight passed. No Gemini call made.'); process.exit(0); }
 
-  const version = gemini(['--version']);
+  const version = runGemini(['--version'], { cwd: root });
   if (version.error || version.status !== 0) fail('Gemini CLI not found or unusable. Install/authenticate it, then rerun. Try: gemini --version');
   const runDir = path.join(workDir, 'runs', timestamp);
   fs.mkdirSync(runDir, { recursive: true });

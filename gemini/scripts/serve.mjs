@@ -1,7 +1,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { dynamicDir } from './core.mjs';
+import { dynamicDir, discover, loadData } from './core.mjs';
 
 const files = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
@@ -11,6 +11,17 @@ const files = new Map([
 http.createServer((req, res) => {
   const entry = files.get((req.url ?? '').split('?')[0]);
   if (!entry) { res.writeHead(404); res.end('Not found'); return; }
+  if (entry[0] === 'report-data.json') {
+    try {
+      const data = loadData(discover());
+      res.writeHead(200, { 'Content-Type': entry[1], 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify(data));
+    } catch (error) {
+      res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`Unable to refresh local source: ${error.message}`);
+    }
+    return;
+  }
   const file = path.join(dynamicDir, entry[0]);
   if (!fs.existsSync(file)) { res.writeHead(404); res.end('Run npm start first'); return; }
   res.writeHead(200, { 'Content-Type': entry[1], 'Cache-Control': 'no-store' });
