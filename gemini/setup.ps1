@@ -47,46 +47,56 @@ function Test-ConverterArchive {
 }
 
 function Invoke-ArchiveDownload {
-    param([string]$Uri, [string]$Destination)
+    param([string]$Uri, [string]$Destination, [int]$MaxAttempts = 10, [int]$DelaySeconds = 5)
     $lastError = $null
-    for ($attempt = 1; $attempt -le 3; $attempt++) {
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
         try {
+            Write-Host "  Download attempt $attempt of $MaxAttempts..." -ForegroundColor DarkGray
             Invoke-WebRequest -Uri $Uri -OutFile $Destination -Headers $Headers -UseBasicParsing -TimeoutSec 120
             $rootName = Test-ConverterArchive -Path $Destination
             return $rootName
         } catch {
             $lastError = $_.Exception.Message
             Write-Host "  Attempt $attempt failed: $lastError" -ForegroundColor Yellow
-            if ($attempt -lt 3) { Start-Sleep -Seconds (2 * $attempt) }
+            if ($attempt -lt $MaxAttempts) {
+                Write-Host "  Corporate proxy may be transient. Retrying in $DelaySeconds seconds..." -ForegroundColor DarkGray
+                Start-Sleep -Seconds $DelaySeconds
+            }
         }
     }
-    throw $lastError
+    throw "Download failed after $MaxAttempts attempts. Last error: $lastError"
 }
 
 function Get-LatestCommit {
-    try {
-        $apiHeaders = @{
-            'User-Agent' = $UserAgent
-            'Accept' = 'application/vnd.github+json'
-            'X-GitHub-Api-Version' = '2022-11-28'
-        }
-        $sha = [string](Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/commits/main" -Headers $apiHeaders -TimeoutSec 30).sha
-        if ($sha -match '^[0-9a-fA-F]{40}$') { return $sha.ToLowerInvariant() }
-    } catch {
-        Write-Host "  Could not resolve main commit: $($_.Exception.Message)" -ForegroundColor Yellow
+    $apiHeaders = @{
+        'User-Agent' = $UserAgent
+        'Accept' = 'application/vnd.github+json'
+        'X-GitHub-Api-Version' = '2022-11-28'
     }
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            $sha = [string](Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/commits/main" -Headers $apiHeaders -TimeoutSec 30).sha
+            if ($sha -notmatch '^[0-9a-fA-F]{40}$') { throw 'GitHub returned an invalid main commit.' }
+            return $sha.ToLowerInvariant()
+        } catch {
+            $lastError = $_.Exception.Message
+            if ($attempt -lt 3) { Start-Sleep -Seconds ($attempt * 2) }
+        }
+    }
+    Write-Host "  WARNING: Could not resolve GitHub main: $lastError" -ForegroundColor Yellow
+    Write-Host '  The branch download will use a unique cache-busting URL.' -ForegroundColor Yellow
     return $null
 }
 
 function Get-ArchiveViaBrowser {
-    param([string]$Destination)
+    param([string]$Destination, [string]$Url)
     $browser = Get-Command msedge.exe -ErrorAction SilentlyContinue
     if (-not $browser) { throw 'Edge is unavailable for the browser download fallback.' }
-    $browserUrl = "https://github.com/$Repository/archive/refs/heads/main.zip"
     $downloadsDir = Join-Path $env:USERPROFILE 'Downloads'
     $started = (Get-Date).ToUniversalTime()
     Write-Host '  Trying Edge download fallback...' -ForegroundColor Yellow
-    Start-Process -FilePath $browser.Source -ArgumentList $browserUrl
+    Start-Process -FilePath $browser.Source -ArgumentList $Url
     for ($elapsed = 0; $elapsed -lt 300; $elapsed += 3) {
         Start-Sleep -Seconds 3
         $candidates = @(Get-ChildItem -LiteralPath $downloadsDir -Filter 'html_converter*.zip' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending)
@@ -129,25 +139,21 @@ try {
             Write-Host "Using local archive: $localArchive" -ForegroundColor Cyan
         } else {
             $sha = Get-LatestCommit
+            if ($sha) { Write-Host "  Latest GitHub main commit: $sha" -ForegroundColor DarkGray }
             $cacheBuster = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-            $ref = if ($sha) { $sha } else { 'main' }
-            $sources = @(
-                @{ Name = 'GitHub API zipball'; Url = "https://api.github.com/repos/$Repository/zipball/$ref" },
-                @{ Name = 'GitHub archive'; Url = "https://github.com/$Repository/archive/$ref.zip?nocache=$cacheBuster" },
-                @{ Name = 'codeload.github.com'; Url = "https://codeload.github.com/$Repository/zip/$ref?nocache=$cacheBuster" }
-            )
-            $archiveRoot = $null
-            foreach ($source in $sources) {
-                Write-Host "Downloading latest via $($source.Name)..." -ForegroundColor Cyan
-                try {
-                    $archiveRoot = Invoke-ArchiveDownload -Uri $source.Url -Destination $zipPath
-                    Write-Host "  Downloaded via $($source.Name)." -ForegroundColor Green
-                    break
-                } catch {
-                    Write-Host "  Source unavailable: $($_.Exception.Message)" -ForegroundColor Yellow
-                }
+            $zipUrl = if ($sha) {
+                "https://github.com/$Repository/archive/$sha.zip"
+            } else {
+                "https://github.com/$Repository/archive/refs/heads/main.zip?nocache=$cacheBuster"
             }
-            if (-not $archiveRoot) { $archiveRoot = Get-ArchiveViaBrowser -Destination $zipPath }
+            Write-Host 'Downloading latest GitHub archive...' -ForegroundColor Cyan
+            try {
+                $archiveRoot = Invoke-ArchiveDownload -Uri $zipUrl -Destination $zipPath
+                Write-Host '  Downloaded via PowerShell.' -ForegroundColor Green
+            } catch {
+                Write-Host "  Direct download failed: $($_.Exception.Message)" -ForegroundColor Yellow
+                $archiveRoot = Get-ArchiveViaBrowser -Destination $zipPath -Url $zipUrl
+            }
         }
 
         Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath
