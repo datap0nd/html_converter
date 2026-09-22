@@ -1,12 +1,14 @@
 import { spawnSync } from 'node:child_process';
 
 export function runGemini(args, options = {}) {
+  const childEnv = { ...process.env, NO_COLOR: '1', ...options.env };
+  for (const key of Object.keys(childEnv)) if (/^PG_(?:PASSWORD|USER|HOST|DATABASE|SSL_CA_FILE)$/.test(key)) delete childEnv[key];
   const common = {
     cwd: options.cwd,
     encoding: 'utf8',
     timeout: 20 * 60 * 1000,
     maxBuffer: 50 * 1024 * 1024,
-    env: { ...process.env, NO_COLOR: '1', ...options.env }
+    env: childEnv
   };
   if (process.platform !== 'win32') return spawnSync('gemini', args, common);
   // npm installs Gemini CLI as gemini.cmd on Windows. Invoke cmd explicitly;

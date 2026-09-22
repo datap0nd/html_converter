@@ -1,7 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { root, workDir, dynamicDir, staticDir, discover, loadData, writeJson, readJson } from './core.mjs';
+import { root, workDir, dynamicDir, staticDir, discover, writeJson, readJson } from './core.mjs';
 import { runGemini } from './gemini.mjs';
+import { loadLocalEnv } from './env.mjs';
+import { loadAllData } from './sources.mjs';
+import { ensurePostgresDriver } from './deps.mjs';
 import { createPreview } from './preview.mjs';
 import { makeSnapshot } from './snapshot.mjs';
 import { validate } from './validate.mjs';
@@ -47,10 +50,22 @@ function backupExisting(runDir) {
 }
 
 try {
+  const env = loadLocalEnv();
   const inventory = discover();
-  const data = loadData(inventory);
   fs.mkdirSync(workDir, { recursive: true });
   writeJson(path.join(workDir, 'inventory.json'), inventory);
+  if (inventory.unsupportedConnectors?.length) {
+    const names = [...new Set(inventory.unsupportedConnectors.map(x => x.connector))].join(', ');
+    throw new Error(`Unsupported source connector(s): ${names}. This run stopped rather than silently omit their data. See work/inventory.json after using npm run preflight, or provide approved exports in input/data and remove the unsupported model source.`);
+  }
+  if (inventory.directCsvSources?.some(x => !x.available)) {
+    throw new Error('A PBIP-referenced CSV path is not readable on this PC. Check work/inventory.json, network/VPN access, and the account running npm start.');
+  }
+  if (inventory.postgresSources?.length && (!env.PG_USER || !env.PG_PASSWORD)) {
+    throw new Error('PostgreSQL source found. Fill PG_USER and PG_PASSWORD in gemini/.env with a read-only login, then rerun npm start.');
+  }
+  ensurePostgresDriver(inventory);
+  const data = await loadAllData(inventory, env);
   console.log(`Project: ${inventory.project}`);
   console.log(`PBIR pages: ${inventory.pages.length}; visuals: ${inventory.pages.reduce((n, p) => n + p.visuals.length, 0)}; local datasets: ${data.datasets.length}`);
   inventory.warnings.forEach(x => console.warn(`Warning: ${x}`));
@@ -61,7 +76,7 @@ try {
   const runDir = path.join(workDir, 'runs', timestamp);
   fs.mkdirSync(runDir, { recursive: true });
   backupExisting(runDir);
-  writeJson(path.join(workDir, 'current-run.json'), { startedAt: new Date().toISOString(), project: inventory.project, runLog: path.relative(root, runDir).replaceAll('\\', '/'), dataStatus: data.datasets.length ? 'local exports supplied' : 'metadata only — do not invent values' });
+  writeJson(path.join(workDir, 'current-run.json'), { startedAt: new Date().toISOString(), project: inventory.project, runLog: path.relative(root, runDir).replaceAll('\\', '/'), dataStatus: data.datasets.length ? 'source rows loaded — verify Power Query and DAX parity' : 'metadata only — do not invent values' });
   createPreview(inventory, data);
 
   runPhase('01-interpret', 'prompts/01-interpret.md', 'work/interpretation.json', runDir);

@@ -1,19 +1,21 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { dynamicDir, discover, loadData } from './core.mjs';
+import { dynamicDir, discover } from './core.mjs';
+import { loadLocalEnv } from './env.mjs';
+import { loadAllData } from './sources.mjs';
 
 const files = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
   ['/index.html', ['index.html', 'text/html; charset=utf-8']],
   ['/report-data.json', ['report-data.json', 'application/json; charset=utf-8']]
 ]);
-http.createServer((req, res) => {
+http.createServer(async (req, res) => {
   const entry = files.get((req.url ?? '').split('?')[0]);
   if (!entry) { res.writeHead(404); res.end('Not found'); return; }
   if (entry[0] === 'report-data.json') {
     try {
-      const data = loadData(discover());
+      const data = await loadAllData(discover(), loadLocalEnv());
       res.writeHead(200, { 'Content-Type': entry[1], 'Cache-Control': 'no-store' });
       res.end(JSON.stringify(data));
     } catch (error) {

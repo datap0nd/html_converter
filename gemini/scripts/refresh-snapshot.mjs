@@ -1,9 +1,11 @@
 import path from 'node:path';
-import { discover, loadData, dynamicDir, writeJson } from './core.mjs';
+import { discover, dynamicDir, writeJson } from './core.mjs';
+import { loadLocalEnv } from './env.mjs';
+import { loadAllData } from './sources.mjs';
 import { makeSnapshot } from './snapshot.mjs';
 
 try {
-  const data = loadData(discover());
+  const data = await loadAllData(discover(), loadLocalEnv());
   writeJson(path.join(dynamicDir, 'report-data.json'), data);
   const target = makeSnapshot();
   console.log(`Refreshed ${target} from ${data.datasets.length} dataset(s).`);

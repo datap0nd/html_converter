@@ -69,7 +69,11 @@ function mTextSources(file) {
   if (!model) return [];
   const found = [];
   function visit(value) {
-    if (typeof value === 'string') { if (value.includes('File.Contents')) found.push(value); }
+    if (typeof value === 'string') { if (value.includes('File.Contents') || value.includes('PostgreSQL.Database')) found.push(value); }
+    else if (Array.isArray(value) && value.every(x => typeof x === 'string')) {
+      const joined = value.join('\n');
+      if (joined.includes('File.Contents') || joined.includes('PostgreSQL.Database')) found.push(joined);
+    }
     else if (Array.isArray(value)) value.forEach(visit);
     else if (value && typeof value === 'object') Object.values(value).forEach(visit);
   }
@@ -77,9 +81,40 @@ function mTextSources(file) {
   return found;
 }
 
+function modelSourceFiles(files) {
+  return files.filter(f => /\.(tmdl|m|pq|bim)$/i.test(f) && !/[\\/](?:TMDLScripts|DAXQueries)[\\/]/i.test(f));
+}
+
+export function findPostgresSources(files) {
+  const found = new Map();
+  const quote = '"((?:[^\"]|\"\")*)"';
+  const databaseCall = new RegExp(`PostgreSQL\\.Database\\s*\\(\\s*${quote}\\s*,\\s*${quote}`, 'gi');
+  for (const file of modelSourceFiles(files)) {
+    for (const sourceText of mTextSources(file)) {
+      for (const match of sourceText.matchAll(databaseCall)) {
+        const server = match[1].replaceAll('""', '"');
+        const database = match[2].replaceAll('""', '"');
+        const tail = sourceText.slice(match.index + match[0].length);
+        const tables = [];
+        for (const nav of tail.matchAll(/\[\s*Schema\s*=\s*"((?:[^"]|"")*)"\s*,\s*Item\s*=\s*"((?:[^"]|"")*)"\s*\]/gi)) {
+          tables.push({ schema: nav[1].replaceAll('""', '"'), item: nav[2].replaceAll('""', '"') });
+        }
+        const hasNativeQuery = /\bQuery\s*=\s*"|Value\.NativeQuery\s*\(/i.test(tail);
+        const key = `${server}\0${database}`;
+        const existing = found.get(key) ?? { server, database, tables: [], hasNativeQuery: false, referencedBy: [] };
+        for (const table of tables) if (!existing.tables.some(x => x.schema === table.schema && x.item === table.item)) existing.tables.push(table);
+        existing.hasNativeQuery ||= hasNativeQuery;
+        if (!existing.referencedBy.includes(relative(file))) existing.referencedBy.push(relative(file));
+        found.set(key, existing);
+      }
+    }
+  }
+  return [...found.values()];
+}
+
 export function findDirectCsvSources(files) {
   const found = new Map();
-  for (const file of files.filter(f => /\.(tmdl|m|pq|bim)$/i.test(f))) {
+  for (const file of modelSourceFiles(files)) {
     for (const sourceText of mTextSources(file)) {
       const matches = sourceText.matchAll(/File\.Contents\s*\(\s*"((?:[^"]|"")*)"\s*\)/gi);
       for (const match of matches) {
@@ -100,6 +135,16 @@ export function findDirectCsvSources(files) {
     }
   }
   return [...found.values()];
+}
+
+export function findUnsupportedConnectors(files) {
+  const connectors = ['Sql.Database', 'MySQL.Database', 'Oracle.Database', 'Odbc.DataSource', 'Odbc.Query', 'Web.Contents', 'SharePoint.Files', 'AzureStorage.Blobs', 'Folder.Files'];
+  const found = [];
+  for (const file of modelSourceFiles(files)) {
+    const text = fs.readFileSync(file, 'utf8');
+    for (const connector of connectors) if (text.includes(connector)) found.push({ connector, referencedBy: relative(file) });
+  }
+  return found;
 }
 
 export function discover() {
@@ -135,16 +180,23 @@ export function discover() {
     return rel.startsWith('input/data/') && /\.(csv|json)$/.test(rel);
   });
   const directCsvSources = findDirectCsvSources(files);
-  const availableDataCount = dataFiles.length + directCsvSources.filter(x => x.available).length;
+  const postgresSources = findPostgresSources(files);
+  const unsupportedConnectors = findUnsupportedConnectors(files);
+  const availableDataCount = dataFiles.length + directCsvSources.filter(x => x.available).length + postgresSources.reduce((n, x) => n + x.tables.length, 0);
   return {
     project: relative(pbip[0]), reportDefinitions: pbir.map(relative),
     pages, dataFiles: dataFiles.map(f => ({ path: relative(f), bytes: fs.statSync(f).size })),
     directCsvSources,
+    postgresSources,
+    unsupportedConnectors,
     sourceFileCount: files.length,
     warnings: [
       ...(availableDataCount ? [] : ['No readable local CSV/JSON exports or direct File.Contents CSV sources found. Output can only be a metadata/layout preview.']),
       ...directCsvSources.filter(x => !x.available).map(x => `CSV source not readable: ${x.path} (${x.error}).`),
       ...(directCsvSources.some(x => x.available) ? ['Direct CSV source rows are raw; Power Query transformations and DAX have not been executed.'] : []),
+      ...(postgresSources.length ? ['PostgreSQL sources found. A read-only login and npm install are required; raw tables/views do not include Power Query or DAX results.'] : []),
+      ...postgresSources.filter(x => !x.tables.length).map(x => `PostgreSQL source ${x.server}/${x.database} has no simple schema/table navigation to read; native or parameterized queries need a supported mapping.`),
+      ...unsupportedConnectors.map(x => `Unsupported connector ${x.connector} in ${x.referencedBy}; this run will not access it.`),
       ...(pages.length ? [] : ['No enhanced PBIR page.json files found. Legacy report.json requires agent interpretation.'])
     ]
   };
