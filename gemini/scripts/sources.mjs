@@ -16,12 +16,76 @@ export function postgresQuery(schema, table, limit) {
   return { text: `SELECT * FROM ${quoteIdentifier(schema)}.${quoteIdentifier(table)} LIMIT $1`, values: [limit + 1] };
 }
 
-export function postgresNativeQuery(sql, limit) {
-  const statement = sql.trim().replace(/;\s*$/, '').trim();
+function inspectNativeSql(sql) {
+  const semicolons = [], placeholders = new Set();
+  let state = 'code', tag = '', depth = 0, escapeSingle = false;
+  for (let i = 0; i < sql.length; i++) {
+    const c = sql[i], next = sql[i + 1];
+    if (state === 'line') { if (c === '\n') state = 'code'; continue; }
+    if (state === 'block') {
+      if (c === '/' && next === '*') { depth++; i++; }
+      else if (c === '*' && next === '/') { if (--depth === 0) state = 'code'; i++; }
+      continue;
+    }
+    if (state === 'dollar') { if (sql.startsWith(tag, i)) { i += tag.length - 1; state = 'code'; } continue; }
+    if (state === 'single' || state === 'double') {
+      const q = state === 'single' ? "'" : '"';
+      if (c === q && next === q) i++;
+      else if (c === q) state = 'code';
+      else if (c === '\\' && state === 'single' && escapeSingle && next) i++;
+      continue;
+    }
+    if (c === '-' && next === '-') { state = 'line'; i++; }
+    else if (c === '/' && next === '*') { state = 'block'; depth = 1; i++; }
+    else if (c === "'") { state = 'single'; escapeSingle = /[eE]/.test(sql[i - 1] ?? '') && !/[\w]/.test(sql[i - 2] ?? ''); }
+    else if (c === '"') state = 'double';
+    else if (c === '$') {
+      const dollar = /^\$[A-Za-z_][A-Za-z_0-9]*\$|^\$\$/.exec(sql.slice(i));
+      if (dollar) { tag = dollar[0]; state = 'dollar'; i += tag.length - 1; }
+      else {
+        const placeholder = /^\$([1-9]\d*)(?![\w$])/.exec(sql.slice(i));
+        if (placeholder) { placeholders.add(Number(placeholder[1])); i += placeholder[0].length - 1; }
+      }
+    } else if (c === ';') semicolons.push(i);
+  }
+  const trimmed = sql.trim();
+  const trailingSemicolon = semicolons.length === 1 && semicolons[0] === sql.lastIndexOf(';') && trimmed.endsWith(';');
+  if (semicolons.length && !trailingSemicolon) throw new Error('Native PostgreSQL query must contain only one statement.');
+  return { statement: trailingSemicolon ? trimmed.slice(0, -1).trim() : trimmed, placeholders };
+}
+
+function nativeSql(sql, params) {
+  const { statement, placeholders } = inspectNativeSql(sql);
   if (!/^(?:select|with)\b/i.test(statement)) throw new Error('Native PostgreSQL query must start with SELECT or WITH.');
-  if (statement.includes(';')) throw new Error('Native PostgreSQL query must contain only one statement.');
-  if (/\$\d+\b/.test(statement)) throw new Error('Parameterized native PostgreSQL queries are not supported.');
-  return { text: `SELECT * FROM (${statement}) AS html_converter_source LIMIT $1`, values: [limit + 1] };
+  if (!Array.isArray(params) || params.some(x => x !== null && !['string', 'number', 'boolean'].includes(typeof x) || typeof x === 'number' && !Number.isFinite(x))) {
+    throw new Error('Native PostgreSQL parameters must be a JSON array of strings, finite numbers, booleans or null.');
+  }
+  const count = Math.max(0, ...placeholders);
+  if (count > 1000) throw new Error('Native PostgreSQL query has an unreasonable positional parameter number.');
+  if (params.length !== count || Array.from({ length: count }, (_, i) => i + 1).some(i => !placeholders.has(i))) {
+    throw new Error(`Native PostgreSQL query requires ${count} positional value(s) ($1…$${count}); found ${params.length}. Set PG_NATIVE_QUERY_PARAMS_JSON in gemini/.env for source-# if the PBIP supplies no literal list.`);
+  }
+  return { statement, values: params };
+}
+
+function nativeParameters(query, env, id) {
+  let configured;
+  if (env.PG_NATIVE_QUERY_PARAMS_JSON) {
+    try { configured = JSON.parse(env.PG_NATIVE_QUERY_PARAMS_JSON); }
+    catch { throw new Error('PG_NATIVE_QUERY_PARAMS_JSON must be valid JSON.'); }
+    if (!configured || Array.isArray(configured) || typeof configured !== 'object') throw new Error('PG_NATIVE_QUERY_PARAMS_JSON must be an object mapping source IDs to arrays.');
+  }
+  return Object.hasOwn(configured ?? {}, id) ? configured[id] : (query.parameters ?? []);
+}
+
+export function postgresNativeQuery(sql, limit, params = []) {
+  const { statement, values } = nativeSql(sql, params);
+  return { text: `SELECT * FROM (${statement}\n) AS html_converter_source LIMIT $${values.length + 1}`, values: [...values, limit + 1] };
+}
+
+function postgresNativePageQuery(sql, limit, offset, params = []) {
+  const { statement, values } = nativeSql(sql, params);
+  return { text: `SELECT * FROM (${statement}\n) AS html_converter_source LIMIT $${values.length + 1} OFFSET $${values.length + 2}`, values: [...values, limit + 1, offset] };
 }
 
 function connectionConfig(source, env) {
@@ -53,8 +117,11 @@ export function listLiveSources(inventory, env = {}) {
     for (const table of connection.tables) sources.push({ id: `source-${sources.length}`, name: `${table.schema}.${table.item}`, type: 'table', connection, table });
     for (const [index, query] of (connection.nativeQueries ?? []).entries()) {
       if (env.PG_ALLOW_NATIVE_QUERIES !== 'true') throw new Error('PBIP contains native PostgreSQL SQL. Review it and set PG_ALLOW_NATIVE_QUERIES=true in gemini/.env.');
-      postgresNativeQuery(query.sql, 1);
-      sources.push({ id: `source-${sources.length}`, name: `Native query ${index + 1}`, type: 'native', connection, query });
+      const id = `source-${sources.length}`;
+      const parameters = nativeParameters(query, env, id);
+      try { postgresNativeQuery(query.sql, 1, parameters); }
+      catch (error) { throw new Error(`${id} (${query.referencedBy}): ${error.message}`); }
+      sources.push({ id, name: `Native query ${index + 1}`, type: 'native', connection, query, parameters });
     }
   }
   if (!sources.length) throw new Error('No supported PostgreSQL table or literal native query found in the PBIP. This live path currently supports PostgreSQL only.');
@@ -73,10 +140,10 @@ export async function fetchLivePage(source, env = {}, { limit = 100, offset = 0 
   try {
     await client.connect();
     await client.query('BEGIN READ ONLY');
-    const base = source.type === 'table'
-      ? `${quoteIdentifier(source.table.schema)}.${quoteIdentifier(source.table.item)}`
-      : `(${source.query.sql.trim().replace(/;\s*$/, '').trim()}) AS html_converter_source`;
-    const result = await client.query({ text: `SELECT * FROM ${base} LIMIT $1 OFFSET $2`, values: [limit + 1, offset] });
+    const request = source.type === 'table'
+      ? { text: `SELECT * FROM ${quoteIdentifier(source.table.schema)}.${quoteIdentifier(source.table.item)} LIMIT $1 OFFSET $2`, values: [limit + 1, offset] }
+      : postgresNativePageQuery(source.query.sql, limit, offset, source.parameters ?? nativeParameters(source.query, env, source.id));
+    const result = await client.query(request);
     await client.query('COMMIT');
     const rows = JSON.parse(JSON.stringify(result.rows.slice(0, limit), (_key, value) => typeof value === 'bigint' ? value.toString() : value));
     return { id: source.id, name: source.name, columns: result.fields.map(x => x.name), rows, offset, limit, hasMore: result.rows.length > limit, fidelity: 'raw-source-not-power-query-or-dax' };
@@ -101,8 +168,9 @@ export async function loadAllData(inventory, env = {}, options = {}) {
     catch { throw new Error('PostgreSQL source found but the pg driver is missing. Run npm install once in gemini/.'); }
   }
   const limit = positiveLimit(env.PG_MAX_ROWS);
+  let sourceIndex = 0;
   for (const source of sources) {
-    if (source.hasUnresolvedNativeQuery) throw new Error(`PostgreSQL source ${source.server}/${source.database} has a native query that cannot be parsed as literal SQL with null parameters. It was not run.`);
+    if (source.hasUnresolvedNativeQuery) throw new Error(`PostgreSQL source ${source.server}/${source.database} has a native query whose target or M parameters cannot be parsed safely. It was not run.`);
     if (!source.tables.length && !source.nativeQueries?.length) throw new Error(`PostgreSQL source ${source.server}/${source.database} has no readable table/view navigation or supported literal native query.`);
     if (source.nativeQueries?.length && env.PG_ALLOW_NATIVE_QUERIES !== 'true') throw new Error(`PostgreSQL source ${source.server}/${source.database} uses native SQL. Review it, then set PG_ALLOW_NATIVE_QUERIES=true in gemini/.env to run it using a read-only login. Later Power Query steps are still not applied.`);
     const client = new Client(connectionConfig(source, env));
@@ -110,6 +178,7 @@ export async function loadAllData(inventory, env = {}, options = {}) {
       await client.connect();
       await client.query('BEGIN READ ONLY');
       for (const table of source.tables) {
+        sourceIndex++;
         const result = await client.query(postgresQuery(table.schema, table.item, limit));
         if (result.rows.length > limit) throw new Error(`PostgreSQL ${table.schema}.${table.item} exceeds PG_MAX_ROWS=${limit}; stopped instead of producing an incomplete snapshot.`);
         const rows = JSON.parse(JSON.stringify(result.rows, (_key, value) => typeof value === 'bigint' ? value.toString() : value));
@@ -119,7 +188,8 @@ export async function loadAllData(inventory, env = {}, options = {}) {
         });
       }
       for (const [index, query] of (source.nativeQueries ?? []).entries()) {
-        const result = await client.query(postgresNativeQuery(query.sql, limit));
+        const params = nativeParameters(query, env, `source-${sourceIndex++}`);
+        const result = await client.query(postgresNativeQuery(query.sql, limit, params));
         if (result.rows.length > limit) throw new Error(`PostgreSQL native query ${index + 1} exceeds PG_MAX_ROWS=${limit}; stopped instead of producing an incomplete snapshot.`);
         const rows = JSON.parse(JSON.stringify(result.rows, (_key, value) => typeof value === 'bigint' ? value.toString() : value));
         data.datasets.push({

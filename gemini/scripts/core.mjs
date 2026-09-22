@@ -89,16 +89,41 @@ export function findPostgresSources(files) {
   const found = new Map();
   const quote = '"((?:[^\"]|\"\")*)"';
   const databaseCall = new RegExp(`PostgreSQL\\.Database\\s*\\(\\s*${quote}\\s*,\\s*${quote}`, 'gi');
-  const nativeCall = new RegExp(`Value\\.NativeQuery\\s*\\(\\s*PostgreSQL\\.Database\\s*\\(\\s*${quote}\\s*,\\s*${quote}\\s*\\)\\s*,\\s*${quote}\\s*,\\s*null\\s*(?:,|\\))`, 'gi');
+  const nativeCall = new RegExp(`Value\\.NativeQuery\\s*\\(\\s*PostgreSQL\\.Database\\s*\\(\\s*${quote}\\s*,\\s*${quote}\\s*\\)\\s*,\\s*${quote}\\s*,\\s*(null|\\{[^{}]*\\})\\s*(?:,|\\))`, 'gi');
   const unquote = value => value.replaceAll('""', '"');
+  const parseLiteralList = value => {
+    if (value.toLowerCase() === 'null') return [];
+    const body = value.slice(1, -1).trim();
+    if (!body) return [];
+    const parts = [], current = [];
+    let quoted = false;
+    for (let i = 0; i < body.length; i++) {
+      const char = body[i];
+      if (char === '"' && quoted && body[i + 1] === '"') { current.push('""'); i++; }
+      else if (char === '"') { quoted = !quoted; current.push(char); }
+      else if (char === ',' && !quoted) { parts.push(current.join('')); current.length = 0; }
+      else current.push(char);
+    }
+    if (quoted) return null;
+    parts.push(current.join(''));
+    return parts.map(part => {
+      const item = part.trim();
+      if (/^"(?:[^"]|"")*"$/.test(item)) return unquote(item.slice(1, -1));
+      if (/^(true|false|null)$/i.test(item)) return ({ true: true, false: false, null: null })[item.toLowerCase()];
+      if (/^-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(item)) return Number(item);
+      return undefined;
+    });
+  };
   for (const file of modelSourceFiles(files)) {
     for (const sourceText of mTextSources(file)) {
       const nativeByConnection = new Map();
+      let parsedNativeCalls = 0;
       for (const match of sourceText.matchAll(nativeCall)) {
         const key = `${unquote(match[1])}\0${unquote(match[2])}`;
         const sql = unquote(match[3]).replace(/#\((lf|cr|tab)\)/gi, (_escape, name) => ({ lf: '\n', cr: '\r', tab: '\t' })[name.toLowerCase()]);
         const queries = nativeByConnection.get(key) ?? [];
-        queries.push({ sql, referencedBy: relative(file) });
+        const parameters = parseLiteralList(match[4]);
+        if (parameters?.every(value => value !== undefined)) { queries.push({ sql, parameters, referencedBy: relative(file) }); parsedNativeCalls++; }
         nativeByConnection.set(key, queries);
       }
       for (const match of sourceText.matchAll(databaseCall)) {
@@ -113,9 +138,10 @@ export function findPostgresSources(files) {
         const existing = found.get(key) ?? { server, database, tables: [], nativeQueries: [], hasUnresolvedNativeQuery: false, referencedBy: [] };
         for (const table of tables) if (!existing.tables.some(x => x.schema === table.schema && x.item === table.item)) existing.tables.push(table);
         for (const query of nativeByConnection.get(key) ?? []) {
-          if (!existing.nativeQueries.some(x => x.sql === query.sql)) existing.nativeQueries.push(query);
+          if (!existing.nativeQueries.some(x => x.sql === query.sql && JSON.stringify(x.parameters) === JSON.stringify(query.parameters))) existing.nativeQueries.push(query);
         }
-        existing.hasUnresolvedNativeQuery ||= /Value\.NativeQuery\s*\(/i.test(sourceText) && !existing.nativeQueries.length;
+        // Never silently omit a second query whose M parameters or target cannot be parsed.
+        existing.hasUnresolvedNativeQuery ||= (sourceText.match(/Value\.NativeQuery\s*\(/gi)?.length ?? 0) > parsedNativeCalls;
         if (!existing.referencedBy.includes(relative(file))) existing.referencedBy.push(relative(file));
         found.set(key, existing);
       }

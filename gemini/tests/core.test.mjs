@@ -146,11 +146,57 @@ test('literal Value.NativeQuery is opt-in, bounded, and run in a read-only trans
   }
 });
 
-test('native SQL wrapper rejects writes, parameters, and extra statements', () => {
+test('native SQL wrapper binds positional parameters, rejects missing values, writes and extra statements', () => {
   assert.throws(() => postgresNativeQuery('DELETE FROM sales', 10), /SELECT or WITH/);
-  assert.throws(() => postgresNativeQuery('SELECT * FROM sales WHERE id = $1', 10), /Parameterized/);
+  assert.throws(() => postgresNativeQuery('SELECT * FROM sales WHERE id = $1', 10), /requires 1 positional value/);
+  assert.deepEqual(postgresNativeQuery('SELECT * FROM sales WHERE a=$1 AND b=$2', 10, ['MENA', 2025]), {
+    text: 'SELECT * FROM (SELECT * FROM sales WHERE a=$1 AND b=$2\n) AS html_converter_source LIMIT $3',
+    values: ['MENA', 2025, 11]
+  });
+  assert.deepEqual(postgresNativeQuery("SELECT '$1;' -- comment", 10).values, [11]);
+  assert.deepEqual(postgresNativeQuery('SELECT $$ $1; $$', 10).values, [11]);
   assert.throws(() => postgresNativeQuery('SELECT 1; DROP TABLE sales', 10), /only one statement/);
   assert.deepEqual(postgresNativeQuery('SELECT 1;', 10).values, [11]);
+});
+
+test('literal M positional parameters bind automatically for live and snapshot paths', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'html-converter-test-'));
+  try {
+    const tmdl = path.join(dir, 'parameterized.tmdl');
+    fs.writeFileSync(tmdl, 'partition Report = m\n source = Value.NativeQuery(PostgreSQL.Database("dbhost", "analytics"), "select $1::text as name, $2::int as amount", {"MENA", 42}, [EnableFolding=true])\n');
+    const inventory = { dataFiles: [], directCsvSources: [], postgresSources: findPostgresSources([tmdl]) };
+    assert.deepEqual(inventory.postgresSources[0].nativeQueries[0].parameters, ['MENA', 42]);
+    const env = { PG_USER: 'reader', PG_PASSWORD: 'secret', PG_SSL_MODE: 'disable', PG_ALLOW_NATIVE_QUERIES: 'true', PG_MAX_ROWS: '10' };
+    const [source] = listLiveSources(inventory, env);
+    const requests = [];
+    class FakeClient {
+      async connect() {}
+      async query(query) {
+        if (typeof query === 'string') return {};
+        requests.push(query);
+        return { rows: [{ name: 'MENA', amount: 42 }], fields: [{ name: 'name' }, { name: 'amount' }] };
+      }
+      async end() {}
+    }
+    await fetchLivePage(source, env, { limit: 2, offset: 3 }, { Client: FakeClient });
+    assert.match(requests[0].text, /LIMIT \$3 OFFSET \$4$/);
+    assert.deepEqual(requests[0].values, ['MENA', 42, 3, 3]);
+    await loadAllData(inventory, env, { Client: FakeClient });
+    assert.deepEqual(requests[1].values, ['MENA', 42, 11]);
+  } finally {
+    const resolved = path.resolve(dir);
+    if (path.dirname(resolved) !== path.resolve(os.tmpdir()) || !path.basename(resolved).startsWith('html-converter-test-')) throw new Error('Unsafe test cleanup path');
+    fs.rmSync(resolved, { recursive: true, force: true });
+  }
+});
+
+test('parameters missing from M can be supplied per source in local environment only', async () => {
+  const connection = { server: 'dbhost', database: 'analytics', tables: [{ schema: 'public', item: 'regions' }], nativeQueries: [{ sql: 'select $1::text as region', parameters: [], referencedBy: 'input/report.tmdl' }] };
+  const env = { PG_USER: 'reader', PG_PASSWORD: 'secret', PG_SSL_MODE: 'disable', PG_ALLOW_NATIVE_QUERIES: 'true' };
+  assert.throws(() => listLiveSources({ postgresSources: [connection] }, env), /PG_NATIVE_QUERY_PARAMS_JSON/);
+  const [, source] = listLiveSources({ postgresSources: [connection] }, { ...env, PG_NATIVE_QUERY_PARAMS_JSON: '{"source-1":["MENA"]}' });
+  assert.deepEqual(source.parameters, ['MENA']);
+  assert.throws(() => listLiveSources({ postgresSources: [connection] }, { ...env, PG_NATIVE_QUERY_PARAMS_JSON: '{"source-1":{"region":"MENA"}}' }), /JSON array/);
 });
 
 test('live PostgreSQL path pages native SQL without embedding credentials or all rows', async () => {
