@@ -6,7 +6,7 @@ import { makeSnapshot } from '../scripts/snapshot.mjs';
 import { runGemini, runGeminiAsync } from '../scripts/gemini.mjs';
 import { loadAllData, postgresQuery, postgresNativeQuery, listLiveSources, fetchLivePage } from '../scripts/sources.mjs';
 import { createLivePreview } from '../scripts/live-preview.mjs';
-import { validateLiveReport, geminiFailureDetail } from '../scripts/start-live-report.mjs';
+import { validateLiveReport, geminiFailureDetail, isTransientGeminiFailure, geminiRetryDelayMs } from '../scripts/start-live-report.mjs';
 import { inputFingerprint, captureArtifacts, artifactsMatch, saveCheckpoint } from '../scripts/checkpoints.mjs';
 import { exportDesktopModel, modelExportData } from '../scripts/desktop-model.mjs';
 import fs from 'node:fs';
@@ -277,6 +277,16 @@ test('live report validation requires generated visual coverage, a backend call,
 test('Gemini CLI failure detail surfaces JSON errors while redacting source passwords', () => {
   assert.equal(geminiFailureDetail({ stdout: JSON.stringify({ error: { message: 'Bad password secret-value' } }), stderr: '' }, { PG_PASSWORD: 'secret-value' }), 'Bad password [redacted]');
   assert.equal(geminiFailureDetail({ stdout: 'model unavailable', stderr: '' }), 'model unavailable');
+});
+
+test('Gemini rate limits and capacity errors use bounded exponential retry delays', () => {
+  assert.equal(isTransientGeminiFailure({ status: 429, stdout: '', stderr: '' }), true);
+  assert.equal(isTransientGeminiFailure({ status: 1, stdout: '{"error":"RESOURCE_EXHAUSTED"}', stderr: '' }), true);
+  assert.equal(isTransientGeminiFailure({ status: 1, stdout: '', stderr: 'No capacity available for model' }), true);
+  assert.equal(isTransientGeminiFailure({ status: 1, stdout: '', stderr: '256-color support not detected' }), false);
+  assert.equal(geminiRetryDelayMs({ stderr: 'retryDelay: 12s' }, 1), 12_000);
+  assert.equal(geminiRetryDelayMs({}, 1), 30_000);
+  assert.equal(geminiRetryDelayMs({}, 5), 300_000);
 });
 
 test('converter checkpoints survive restarts and invalidate when PBIP or artifacts change', () => {

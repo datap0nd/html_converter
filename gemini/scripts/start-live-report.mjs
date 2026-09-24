@@ -72,6 +72,21 @@ export function geminiFailureDetail(result, env = {}) {
   return detail.length > 1800 ? `${detail.slice(0, 900)}\n... [truncated] ...\n${detail.slice(-900)}` : detail;
 }
 
+function geminiFailureText(result) {
+  return [result?.status, result?.error?.message, result?.stderr, result?.stdout].filter(value => value !== undefined && value !== null).join('\n');
+}
+
+export function isTransientGeminiFailure(result) {
+  const detail = geminiFailureText(result);
+  return Number(result?.status) === 429 || /\b429\b|RESOURCE_EXHAUSTED|MODEL_CAPACITY_EXHAUSTED|rate[ -]?limit|too many requests|high demand|no capacity available/i.test(detail);
+}
+
+export function geminiRetryDelayMs(result, failedAttempt) {
+  const match = geminiFailureText(result).match(/retry(?:delay|[-_ ]after|\s+in)?[^0-9]{0,40}(\d+(?:\.\d+)?)\s*s/i);
+  const requested = match ? Number(match[1]) * 1000 : 30_000 * (2 ** Math.max(0, failedAttempt - 1));
+  return Math.min(300_000, Math.max(5_000, requested));
+}
+
 export function validateLiveReport(inventory, markup, review, env = {}) {
   const issues = [];
   if (!/<html\b/i.test(markup) || !/<script\b/i.test(markup)) issues.push('Generated HTML is not an interactive report.');
@@ -93,15 +108,34 @@ export function validateLiveReport(inventory, markup, review, env = {}) {
 
 async function runPhase([name, promptFile, expectedFile], model, runDir, stage, env) {
   const expected = path.join(stage, expectedFile);
-  if (fs.existsSync(expected)) fs.unlinkSync(expected);
   console.log(`[${name}] Gemini ${model} starting...`);
   const prompt = `Read ${promptFile}, work/live-run.json, work/inventory.json, and the relevant PBIP files. Follow the phase instructions exactly. Do not read .env or run shell commands. Write ${expectedFile}.`;
-  const result = await runGeminiAsync(['--model', model, '--skip-trust', '-e', 'none', '--approval-mode', 'auto_edit', '--output-format', 'json', '-p', prompt], {
-    cwd: stage, onHeartbeat: message => console.log(`[${name}] ${message}`)
-  });
-  fs.writeFileSync(path.join(runDir, `${name}.stdout.json`), result.stdout ?? '');
-  fs.writeFileSync(path.join(runDir, `${name}.stderr.log`), result.stderr ?? '');
-  if (result.error || result.status !== 0) throw new Error(`${name}: Gemini failed (${result.error?.message ?? `exit ${result.status}`}). ${geminiFailureDetail(result, env)} Full logs: ${path.relative(root, runDir)}/${name}.stderr.log and .stdout.json.`);
+  const maxAttempts = 5;
+  let result;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (fs.existsSync(expected)) fs.unlinkSync(expected);
+    if (name === '02-build') {
+      for (const file of ['index.html', 'backend.mjs']) {
+        const staged = path.join(stage, 'output', 'dynamic', file);
+        if (fs.existsSync(staged)) fs.unlinkSync(staged);
+      }
+    } else if (name.startsWith('04-page-')) {
+      for (const file of ['index.html', 'backend.mjs']) fs.copyFileSync(path.join(dynamicDir, file), path.join(stage, 'output', 'dynamic', file));
+    }
+    if (attempt > 1) console.log(`[${name}] Gemini retry ${attempt} of ${maxAttempts}...`);
+    result = await runGeminiAsync(['--model', model, '--skip-trust', '-e', 'none', '--approval-mode', 'auto_edit', '--output-format', 'json', '-p', prompt], {
+      cwd: stage, onHeartbeat: message => console.log(`[${name}] ${message}`)
+    });
+    const suffix = attempt === 1 ? '' : `.attempt-${attempt}`;
+    fs.writeFileSync(path.join(runDir, `${name}${suffix}.stdout.json`), result.stdout ?? '');
+    fs.writeFileSync(path.join(runDir, `${name}${suffix}.stderr.log`), result.stderr ?? '');
+    if (!result.error && result.status === 0) break;
+    if (!isTransientGeminiFailure(result) || attempt === maxAttempts) break;
+    const delayMs = geminiRetryDelayMs(result, attempt);
+    console.log(`[${name}] Gemini returned a transient 429/capacity error. Retrying in ${Math.round(delayMs / 1000)} seconds; saved converter checkpoints are unchanged.`);
+    await new Promise(resolve => setTimeout(resolve, delayMs));
+  }
+  if (result.error || result.status !== 0) throw new Error(`${name}: Gemini failed after rate-limit retries (${result.error?.message ?? `exit ${result.status}`}). ${geminiFailureDetail(result, env)} Full logs: ${path.relative(root, runDir)}/${name}*.stderr.log and .stdout.json.`);
   if (!fs.existsSync(expected) || !readJson(expected)) throw new Error(`${name}: expected valid JSON at ${expectedFile}. See run logs.`);
   fs.copyFileSync(expected, path.join(root, expectedFile));
   if (name === '02-build' || name.startsWith('04-page-')) {
