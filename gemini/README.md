@@ -20,6 +20,8 @@ Progress is saved in `work/live-state.json`. Re-running the same `setup.ps1` wit
 
 Gemini `429`, `RESOURCE_EXHAUSTED`, rate-limit, and temporary model-capacity failures are retried up to five times with bounded exponential backoff. Every retry starts from the last saved output rather than retaining a partially edited failed attempt. If the provider remains unavailable, setup stops while preserving the checkpoint, and a later `setup.ps1` run resumes the same unfinished page batch. A terminal color-support warning is cosmetic and does not affect conversion.
 
+A Gemini phase that exits successfully but forgets to write its required JSON or generated report files is also incomplete, not successful. The runner recovers a strictly valid JSON artifact when Gemini printed it in the structured response; otherwise it retries the same phase with the missing filenames explicitly listed. Nothing is checkpointed until all required phase files exist.
+
 The runner intends to keep `.env` credentials in the **local Node backend**, not the HTML; it scans generated HTML for known secrets. AI-generated code still requires security review. Private files and SQL databases require a backend while the report is live. An HTML file opened directly or hosted on GitHub Pages cannot maintain private network/SQL connections. For remote hosting you need an approved, authenticated backend with access to those sources. The generated HTML is a review artifact, not a standalone static snapshot.
 
 ## What Gemini can and cannot guarantee

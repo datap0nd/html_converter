@@ -116,6 +116,28 @@ export function geminiRetryDelayMs(result, failedAttempt) {
   return Math.min(300_000, Math.max(5_000, requested));
 }
 
+export function geminiResponseArtifact(stdout) {
+  let envelope;
+  try { envelope = JSON.parse(stdout ?? ''); } catch { return null; }
+  const response = envelope?.response;
+  if (response && typeof response === 'object' && !Array.isArray(response)) return response;
+  if (typeof response !== 'string') return null;
+  const candidate = response.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  try {
+    const parsed = JSON.parse(candidate);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch { return null; }
+}
+
+function missingPhaseOutputs(name, expected, stage) {
+  const missing = [];
+  if (!readJson(expected)) missing.push(path.relative(stage, expected).replaceAll('\\', '/'));
+  if (name === '02-build' || name.startsWith('04-page-')) {
+    for (const file of ['index.html', 'backend.mjs']) if (!fs.existsSync(path.join(stage, 'output', 'dynamic', file))) missing.push(`output/dynamic/${file}`);
+  }
+  return missing;
+}
+
 export function validateLiveReport(inventory, markup, review, env = {}) {
   const issues = [];
   if (!/<html\b/i.test(markup) || !/<script\b/i.test(markup)) issues.push('Generated HTML is not an interactive report.');
@@ -138,9 +160,10 @@ export function validateLiveReport(inventory, markup, review, env = {}) {
 async function runPhase([name, promptFile, expectedFile], model, runDir, stage, env, scope) {
   const expected = path.join(stage, expectedFile);
   console.log(`[${name}] Gemini ${model} starting...`);
-  const prompt = `Read ${promptFile}, work/live-run.json, work/inventory.json, and the relevant PBIP files. Follow the phase instructions exactly. Do not read .env or run shell commands. Write ${expectedFile}.`;
+  const prompt = `Read ${promptFile}, work/live-run.json, work/inventory.json, and the relevant PBIP files. Follow the phase instructions exactly. Do not read .env or run shell commands. You MUST use the file-editing capability to write ${expectedFile}; do not merely print its contents in your response.`;
   const maxAttempts = 5;
   let result;
+  let missing = [];
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     if (fs.existsSync(expected)) fs.unlinkSync(expected);
     if (name === '02-build') {
@@ -152,20 +175,34 @@ async function runPhase([name, promptFile, expectedFile], model, runDir, stage, 
       for (const file of ['index.html', 'backend.mjs']) fs.copyFileSync(path.join(scope.dynamicDir, file), path.join(stage, 'output', 'dynamic', file));
     }
     if (attempt > 1) console.log(`[${name}] Gemini retry ${attempt} of ${maxAttempts}...`);
-    result = await runGeminiAsync(['--model', model, '--skip-trust', '-e', 'none', '--approval-mode', 'auto_edit', '--output-format', 'json', '-p', prompt], {
+    const repairInstruction = attempt > 1 && missing.length ? ` Previous attempt ${attempt - 1} exited without producing these required files: ${missing.join(', ')}. Complete the phase and write every required file now.` : '';
+    result = await runGeminiAsync(['--model', model, '--skip-trust', '-e', 'none', '--approval-mode', 'auto_edit', '--output-format', 'json', '-p', prompt + repairInstruction], {
       cwd: stage, onHeartbeat: message => console.log(`[${name}] ${message}`)
     });
     const suffix = attempt === 1 ? '' : `.attempt-${attempt}`;
     fs.writeFileSync(path.join(runDir, `${name}${suffix}.stdout.json`), result.stdout ?? '');
     fs.writeFileSync(path.join(runDir, `${name}${suffix}.stderr.log`), result.stderr ?? '');
-    if (!result.error && result.status === 0) break;
+    if (!result.error && result.status === 0) {
+      if (!readJson(expected)) {
+        const recovered = geminiResponseArtifact(result.stdout);
+        if (recovered) writeJson(expected, recovered);
+      }
+      missing = missingPhaseOutputs(name, expected, stage);
+      if (!missing.length) break;
+      if (attempt < maxAttempts) {
+        console.log(`[${name}] Gemini exited successfully but omitted ${missing.join(', ')}. Retrying the incomplete phase without checkpointing it.`);
+        continue;
+      }
+      break;
+    }
     if (!isTransientGeminiFailure(result) || attempt === maxAttempts) break;
     const delayMs = geminiRetryDelayMs(result, attempt);
     console.log(`[${name}] Gemini returned a transient 429/capacity error. Retrying in ${Math.round(delayMs / 1000)} seconds; saved converter checkpoints are unchanged.`);
     await new Promise(resolve => setTimeout(resolve, delayMs));
   }
-  if (result.error || result.status !== 0) throw new Error(`${name}: Gemini failed after rate-limit retries (${result.error?.message ?? `exit ${result.status}`}). ${geminiFailureDetail(result, env)} Full logs: ${path.relative(root, runDir)}/${name}*.stderr.log and .stdout.json.`);
-  if (!fs.existsSync(expected) || !readJson(expected)) throw new Error(`${name}: expected valid JSON at ${expectedFile}. See run logs.`);
+  if (result.error || result.status !== 0) throw new Error(`${name}: Gemini failed${isTransientGeminiFailure(result) ? ' after rate-limit retries' : ''} (${result.error?.message ?? `exit ${result.status}`}). ${geminiFailureDetail(result, env)} Full logs: ${path.relative(root, runDir)}/${name}*.stderr.log and .stdout.json.`);
+  missing = missingPhaseOutputs(name, expected, stage);
+  if (missing.length) throw new Error(`${name}: Gemini completed ${maxAttempts} attempts without producing ${missing.join(', ')}. Progress before this phase is saved. See ${path.relative(root, runDir)}.`);
   const persistedExpected = persistedPath(scope, expectedFile);
   fs.mkdirSync(path.dirname(persistedExpected), { recursive: true });
   fs.copyFileSync(expected, persistedExpected);
