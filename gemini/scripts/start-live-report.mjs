@@ -226,7 +226,7 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
     saveCheckpoint(stateFile, state);
   } else console.log('Resuming saved converter progress for the unchanged PBIP.');
   const runDir = fs.mkdtempSync(path.join(workDir, 'live-run-'));
-  const model = env.GEMINI_MODEL?.trim() || 'gemini-3.5-flash';
+  const model = 'gemini-3.8-flash';
   writeJson(path.join(workDir, 'live-run.json'), { project: inventory.project, startedAt: new Date().toISOString(), model, runLog: path.relative(root, runDir).replaceAll('\\', '/') });
   const htmlFile = path.join(dynamicDir, 'index.html');
   const backendFile = path.join(dynamicDir, 'backend.mjs');

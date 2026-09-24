@@ -13,7 +13,7 @@ import { validate } from './validate.mjs';
 process.chdir(root);
 const preflightOnly = process.argv.includes('--preflight');
 const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-const geminiModel = process.env.GEMINI_MODEL?.trim() || 'gemini-3.5-flash';
+const geminiModel = 'gemini-3.8-flash';
 
 function fail(message) { throw new Error(message); }
 
