@@ -1,4 +1,10 @@
 {
+  "hooksConfig": {
+    "enabled": false
+  },
+  "skills": {
+    "enabled": false
+  },
   "tools": {
     "core": ["glob", "grep_search", "list_directory", "read_file", "read_many_files", "write_file", "replace"]
   },
