@@ -59,12 +59,24 @@ function reportCoverage(inventory, markup) {
   }));
 }
 
+export function reportPathIsInScope(relativePath, selectedPageIds) {
+  const normalized = relativePath.replaceAll('\\', '/');
+  const marker = '/definition/pages/';
+  const markerIndex = normalized.toLowerCase().indexOf(marker);
+  if (markerIndex < 0) return true;
+  const tail = normalized.slice(markerIndex + marker.length);
+  if (!tail || tail.toLowerCase() === 'pages.json') return true;
+  const pageId = tail.split('/')[0];
+  return selectedPageIds.has(pageId);
+}
+
 function createGeminiWorkspace(inventory, scope) {
   const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'html-converter-gemini-'));
   for (const folder of ['input', 'work', 'prompts', 'skills', 'scripts', 'output/dynamic']) fs.mkdirSync(path.join(stage, folder), { recursive: true });
   for (const name of ['GEMINI.md']) fs.copyFileSync(path.join(root, name), path.join(stage, name));
   for (const folder of ['prompts', 'skills']) fs.cpSync(path.join(root, folder), path.join(stage, folder), { recursive: true });
   for (const name of ['core.mjs', 'sources.mjs']) fs.copyFileSync(path.join(root, 'scripts', name), path.join(stage, 'scripts', name));
+  const selectedPageIds = new Set(inventory.pages.map(page => page.id));
   fs.cpSync(inputDir, path.join(stage, 'input'), {
     recursive: true,
     filter: source => {
@@ -72,6 +84,7 @@ function createGeminiWorkspace(inventory, scope) {
       if (!rel) return true;
       if (fs.lstatSync(source).isSymbolicLink()) return false;
       if (/^data(?:\/|$)/i.test(rel)) return false;
+      if (!reportPathIsInScope(`/${rel}`, selectedPageIds)) return false;
       return fs.statSync(source).isDirectory() || /\.(?:pbip|pbir|tmdl|m|pq|bim|json)$/i.test(rel);
     }
   });
@@ -162,9 +175,15 @@ async function runPhase([name, promptFile, expectedFile], model, runDir, stage, 
   console.log(`[${name}] Gemini ${model} starting...`);
   const prompt = `Read ${promptFile}, work/live-run.json, work/inventory.json, and the relevant PBIP files. Follow the phase instructions exactly. Do not read .env or run shell commands. You MUST use the file-editing capability to write ${expectedFile}; do not merely print its contents in your response.`;
   const maxAttempts = 5;
+  const phaseBudgetMs = (scope.pageLimit ? 15 : 40) * 60 * 1000;
+  const perAttemptMs = (scope.pageLimit ? 10 : 20) * 60 * 1000;
+  const phaseDeadline = Date.now() + phaseBudgetMs;
   let result;
   let missing = [];
+  let deadlineExceeded = false;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const remainingMs = phaseDeadline - Date.now();
+    if (remainingMs <= 0) { deadlineExceeded = true; break; }
     if (fs.existsSync(expected)) fs.unlinkSync(expected);
     if (name === '02-build') {
       for (const file of ['index.html', 'backend.mjs']) {
@@ -177,7 +196,7 @@ async function runPhase([name, promptFile, expectedFile], model, runDir, stage, 
     if (attempt > 1) console.log(`[${name}] Gemini retry ${attempt} of ${maxAttempts}...`);
     const repairInstruction = attempt > 1 && missing.length ? ` Previous attempt ${attempt - 1} exited without producing these required files: ${missing.join(', ')}. Complete the phase and write every required file now.` : '';
     result = await runGeminiAsync(['--model', model, '--skip-trust', '-e', 'none', '--approval-mode', 'auto_edit', '--output-format', 'json', '-p', prompt + repairInstruction], {
-      cwd: stage, onHeartbeat: message => console.log(`[${name}] ${message}`)
+      cwd: stage, timeout: Math.min(perAttemptMs, remainingMs), onHeartbeat: message => console.log(`[${name}] ${message}`)
     });
     const suffix = attempt === 1 ? '' : `.attempt-${attempt}`;
     fs.writeFileSync(path.join(runDir, `${name}${suffix}.stdout.json`), result.stdout ?? '');
@@ -197,9 +216,11 @@ async function runPhase([name, promptFile, expectedFile], model, runDir, stage, 
     }
     if (!isTransientGeminiFailure(result) || attempt === maxAttempts) break;
     const delayMs = geminiRetryDelayMs(result, attempt);
+    if (Date.now() + delayMs >= phaseDeadline) { deadlineExceeded = true; break; }
     console.log(`[${name}] Gemini returned a transient 429/capacity error. Retrying in ${Math.round(delayMs / 1000)} seconds; saved converter checkpoints are unchanged.`);
     await new Promise(resolve => setTimeout(resolve, delayMs));
   }
+  if (deadlineExceeded) throw new Error(`${name}: phase time budget exhausted after ${Math.round(phaseBudgetMs / 60000)} minutes. Progress before this phase is saved. See ${path.relative(root, runDir)}.`);
   if (result.error || result.status !== 0) throw new Error(`${name}: Gemini failed${isTransientGeminiFailure(result) ? ' after rate-limit retries' : ''} (${result.error?.message ?? `exit ${result.status}`}). ${geminiFailureDetail(result, env)} Full logs: ${path.relative(root, runDir)}/${name}*.stderr.log and .stdout.json.`);
   missing = missingPhaseOutputs(name, expected, stage);
   if (missing.length) throw new Error(`${name}: Gemini completed ${maxAttempts} attempts without producing ${missing.join(', ')}. Progress before this phase is saved. See ${path.relative(root, runDir)}.`);

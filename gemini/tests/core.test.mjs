@@ -6,7 +6,7 @@ import { makeSnapshot } from '../scripts/snapshot.mjs';
 import { runGemini, runGeminiAsync } from '../scripts/gemini.mjs';
 import { loadAllData, postgresQuery, postgresNativeQuery, listLiveSources, fetchLivePage } from '../scripts/sources.mjs';
 import { createLivePreview } from '../scripts/live-preview.mjs';
-import { validateLiveReport, geminiFailureDetail, isTransientGeminiFailure, geminiRetryDelayMs, geminiResponseArtifact, createRunScope, pageLimitFromArgs } from '../scripts/start-live-report.mjs';
+import { validateLiveReport, geminiFailureDetail, isTransientGeminiFailure, geminiRetryDelayMs, geminiResponseArtifact, createRunScope, pageLimitFromArgs, reportPathIsInScope } from '../scripts/start-live-report.mjs';
 import { inputFingerprint, captureArtifacts, artifactsMatch, saveCheckpoint } from '../scripts/checkpoints.mjs';
 import { exportDesktopModel, modelExportData } from '../scripts/desktop-model.mjs';
 import fs from 'node:fs';
@@ -308,6 +308,25 @@ test('Gemini rate limits and capacity errors use bounded exponential retry delay
   assert.equal(geminiRetryDelayMs({}, 5), 300_000);
 });
 
+test('Windows asynchronous Gemini launcher enforces its timeout', { skip: process.platform !== 'win32' }, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'html-converter-test-'));
+  try {
+    const packageDir = path.join(dir, 'node_modules', '@google', 'gemini-cli');
+    fs.mkdirSync(path.join(packageDir, 'dist'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'gemini.cmd'), '@echo off\r\nexit /b 9\r\n');
+    fs.writeFileSync(path.join(packageDir, 'package.json'), JSON.stringify({ bin: { gemini: 'dist/index.mjs' } }));
+    fs.writeFileSync(path.join(packageDir, 'dist', 'index.mjs'), 'setInterval(() => {}, 1000)');
+    const started = Date.now();
+    const result = await runGeminiAsync(['--version'], { cwd: dir, timeout: 50, env: { PATH: dir + path.delimiter + process.env.PATH } });
+    assert.match(result.error?.message ?? '', /timed out/);
+    assert.ok(Date.now() - started < 6000);
+  } finally {
+    const resolved = path.resolve(dir);
+    if (path.dirname(resolved) !== path.resolve(os.tmpdir()) || !path.basename(resolved).startsWith('html-converter-test-')) throw new Error('Unsafe test cleanup path');
+    fs.rmSync(resolved, { recursive: true, force: true });
+  }
+});
+
 test('Gemini JSON response can recover an artifact it printed instead of writing', () => {
   assert.deepEqual(geminiResponseArtifact(JSON.stringify({ response: '```json\n{"status":"complete"}\n```' })), { status: 'complete' });
   assert.deepEqual(geminiResponseArtifact(JSON.stringify({ response: { status: 'complete' } })), { status: 'complete' });
@@ -325,6 +344,11 @@ test('two-page test scope is isolated from the all-pages conversion', () => {
   assert.equal(pageLimitFromArgs(['--page-limit', '2']), 2);
   assert.equal(pageLimitFromArgs([]), null);
   assert.throws(() => pageLimitFromArgs(['--page-limit', 'none']), /positive integer/);
+  const selected = new Set(['page-a', 'page-b']);
+  assert.equal(reportPathIsInScope('/Demo.Report/definition/pages/pages.json', selected), true);
+  assert.equal(reportPathIsInScope('/Demo.Report/definition/pages/page-a/visuals/v1/visual.json', selected), true);
+  assert.equal(reportPathIsInScope('/Demo.Report/definition/pages/page-c/visuals/v2/visual.json', selected), false);
+  assert.equal(reportPathIsInScope('/Demo.SemanticModel/definition/tables/Sales.tmdl', selected), true);
 });
 
 test('converter checkpoints survive restarts and invalidate when PBIP or artifacts change', () => {
