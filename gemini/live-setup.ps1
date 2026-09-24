@@ -164,9 +164,7 @@ try {
         & robocopy.exe $sourceGemini $GeminiDir /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP /XD input output work logs node_modules /XF .env setup.ps1 | Out-Null
         if ($LASTEXITCODE -ge 8) { throw "Code merge failed (robocopy exit code $LASTEXITCODE)." }
         $afterLockHash = if (Test-Path -LiteralPath $lockPath) { (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash } else { '' }
-        $needsDependencies = ($beforeLockHash -ne $afterLockHash -or
-            -not (Test-Path -LiteralPath (Join-Path $GeminiDir 'node_modules/pg/package.json')) -or
-            -not (Test-Path -LiteralPath (Join-Path $GeminiDir 'node_modules/@google/gemini-cli/package.json')))
+        $needsDependencies = $beforeLockHash -ne $afterLockHash -or -not (Test-Path -LiteralPath (Join-Path $GeminiDir 'node_modules/pg/package.json'))
     } else {
         $needsDependencies = $env:HC_SETUP_INSTALL_DEPS -eq '1'
     }
