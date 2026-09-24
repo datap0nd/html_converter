@@ -93,7 +93,7 @@ try {
 
   console.log('Checking Gemini CLI...');
   const version = runGemini(['--version'], { cwd: root, timeout: 15000 });
-  if (version.error || version.status !== 0) fail('Gemini CLI not found or unusable. Install/authenticate it, then rerun. Try: gemini --version');
+  if (version.error || version.status !== 0) fail(`Your existing Gemini CLI could not be launched: ${version.error?.message || version.stderr?.trim() || version.stdout?.trim() || `exit ${version.status}`}. Run gemini --version in this same terminal.`);
   const runDir = path.join(workDir, 'runs', timestamp);
   fs.mkdirSync(runDir, { recursive: true });
   backupExisting(runDir);

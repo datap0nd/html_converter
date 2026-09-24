@@ -4,7 +4,10 @@ import path from 'node:path';
 
 function npmGeminiEntry(env) {
   const searchPath = env.PATH || env.Path || env.path || '';
-  for (const directory of searchPath.split(path.delimiter).filter(Boolean)) {
+  const directories = new Set(searchPath.split(path.delimiter).filter(Boolean));
+  if (env.APPDATA) directories.add(path.join(env.APPDATA, 'npm'));
+  if (env.npm_config_prefix) directories.add(env.npm_config_prefix);
+  for (const directory of directories) {
     const shim = path.join(directory, 'gemini.cmd');
     if (!fs.existsSync(shim)) continue;
     const packageDir = path.join(directory, 'node_modules', '@google', 'gemini-cli');

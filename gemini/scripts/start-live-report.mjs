@@ -267,7 +267,8 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
   fs.mkdirSync(dynamicDir, { recursive: true });
   if (invokeGemini) {
     const version = runGemini(['--version'], { cwd: root, timeout: 15000 });
-    if (version.error || version.status !== 0) throw new Error('Gemini CLI not found or not authenticated. Run gemini --version and sign in.');
+    if (version.error || version.status !== 0) throw new Error(`Your existing Gemini CLI could not be launched. ${geminiFailureDetail(version, env)} Run gemini --version in this same terminal and check that its global npm folder is available.`);
+    console.log(`Using existing Gemini CLI ${version.stdout?.trim() || '(version not reported)'}.`);
     const stage = createGeminiWorkspace(inventory);
     try {
       let upstreamChanged = false;
