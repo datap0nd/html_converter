@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { root, inputDir, workDir, dynamicDir, discover, writeJson, readJson } from './core.mjs';
 import { loadLocalEnv } from './env.mjs';
-import { runGemini, runGeminiAsync } from './gemini.mjs';
+import { runGeminiAsync } from './gemini.mjs';
 import { inputFingerprint, captureArtifacts, artifactsMatch, saveCheckpoint } from './checkpoints.mjs';
 
 const phases = [
@@ -266,9 +266,6 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
   const backendFile = path.join(dynamicDir, 'backend.mjs');
   fs.mkdirSync(dynamicDir, { recursive: true });
   if (invokeGemini) {
-    const version = runGemini(['--version'], { cwd: root, timeout: 15000 });
-    if (version.error || version.status !== 0) throw new Error(`Your existing Gemini CLI could not be launched. ${geminiFailureDetail(version, env)} Run gemini --version in this same terminal and check that its global npm folder is available.`);
-    console.log(`Using existing Gemini CLI ${version.stdout?.trim() || '(version not reported)'}.`);
     const stage = createGeminiWorkspace(inventory);
     try {
       let upstreamChanged = false;

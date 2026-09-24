@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { root, workDir, dynamicDir, staticDir, discover, writeJson, readJson } from './core.mjs';
-import { runGemini, runGeminiAsync } from './gemini.mjs';
+import { runGeminiAsync } from './gemini.mjs';
 import { loadLocalEnv } from './env.mjs';
 import { loadAllData } from './sources.mjs';
 import { ensurePostgresDriver } from './deps.mjs';
@@ -91,9 +91,6 @@ try {
   inventory.warnings.forEach(x => console.warn(`Warning: ${x}`));
   if (preflightOnly) { console.log('Preflight passed. No Gemini call made.'); process.exit(0); }
 
-  console.log('Checking Gemini CLI...');
-  const version = runGemini(['--version'], { cwd: root, timeout: 15000 });
-  if (version.error || version.status !== 0) fail(`Your existing Gemini CLI could not be launched: ${version.error?.message || version.stderr?.trim() || version.stdout?.trim() || `exit ${version.status}`}. Run gemini --version in this same terminal.`);
   const runDir = path.join(workDir, 'runs', timestamp);
   fs.mkdirSync(runDir, { recursive: true });
   backupExisting(runDir);
