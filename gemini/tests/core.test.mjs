@@ -81,6 +81,26 @@ test('Windows npm Gemini launcher bypasses cmd and preserves complex prompt argu
   }
 });
 
+test('Windows launcher resolves the repository-local Gemini CLI installed by npm', { skip: process.platform !== 'win32' }, () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'html-converter-test-'));
+  try {
+    const binDir = path.join(dir, 'node_modules', '.bin');
+    const packageDir = path.join(dir, 'node_modules', '@google', 'gemini-cli');
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.mkdirSync(path.join(packageDir, 'dist'), { recursive: true });
+    fs.writeFileSync(path.join(binDir, 'gemini.cmd'), '@echo off\r\nexit /b 9\r\n');
+    fs.writeFileSync(path.join(packageDir, 'package.json'), JSON.stringify({ bin: { gemini: 'dist/index.mjs' } }));
+    fs.writeFileSync(path.join(packageDir, 'dist', 'index.mjs'), 'process.stdout.write("local-cli")');
+    const result = runGemini(['--version'], { cwd: dir, env: { PATH: binDir + path.delimiter + process.env.PATH } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, 'local-cli');
+  } finally {
+    const resolved = path.resolve(dir);
+    if (path.dirname(resolved) !== path.resolve(os.tmpdir()) || !path.basename(resolved).startsWith('html-converter-test-')) throw new Error('Unsafe test cleanup path');
+    fs.rmSync(resolved, { recursive: true, force: true });
+  }
+});
+
 test('Windows asynchronous Gemini launcher returns phase output', { skip: process.platform !== 'win32' }, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'html-converter-test-'));
   try {

@@ -8,7 +8,7 @@ Put one complete PBIP project (`*.pbip` plus its `.Report` and `.SemanticModel` 
 
 That one command updates the code from GitHub, preserves your `input/`, `.env`, `output/`, `work/`, and logs, installs the checked-in Node dependencies, then runs the converter. The stable `setup.ps1` launcher does not need routine edits; the downloaded `live-setup.ps1` and the npm `start` command control the current workflow. If the window closes, `logs/latest.txt` names the persistent setup log. Stop a previous server with Ctrl+C before starting another.
 
-The workflow is pinned to `gemini-3.8-flash`; a `GEMINI_MODEL` value left in an existing `.env` is ignored.
+The workflow installs its own checked version of Gemini CLI and is pinned to `gemini-3.8-flash`; a global CLI installation is not required, and a `GEMINI_MODEL` value left in an existing `.env` is ignored. Gemini authentication is still required.
 
 The converter scans the PBIP, runs Gemini CLI interpretation, build, and independent review phases, and generates `output/dynamic/index.html` plus a source-specific local `output/dynamic/backend.mjs`. If page/visual coverage is incomplete, it asks Gemini to repair the missing visuals in batches of up to eight, then runs a final independent review. It checks source health and calls every visual endpoint before serving the report at `http://127.0.0.1:8765/`. These checks do not prove that the generated source logic is correct. `npm run preflight` checks PBIP structure without Gemini or source access. The old PostgreSQL table browser is available separately as `npm run live-preview`; it is not the report converter. The older static export path remains `npm run convert` but is not the default.
 

@@ -7,15 +7,20 @@ function npmGeminiEntry(env) {
   for (const directory of searchPath.split(path.delimiter).filter(Boolean)) {
     const shim = path.join(directory, 'gemini.cmd');
     if (!fs.existsSync(shim)) continue;
-    const packageDir = path.join(directory, 'node_modules', '@google', 'gemini-cli');
-    const packageFile = path.join(packageDir, 'package.json');
-    if (!fs.existsSync(packageFile)) continue;
-    try {
-      const bin = JSON.parse(fs.readFileSync(packageFile, 'utf8')).bin?.gemini;
-      if (typeof bin !== 'string') continue;
-      const entry = path.resolve(packageDir, bin);
-      if (entry.startsWith(path.resolve(packageDir) + path.sep) && fs.existsSync(entry)) return entry;
-    } catch { /* This is not the standard npm Gemini CLI install. */ }
+    const candidates = [
+      path.join(directory, 'node_modules', '@google', 'gemini-cli'),
+      path.resolve(directory, '..', '@google', 'gemini-cli')
+    ];
+    for (const packageDir of candidates) {
+      const packageFile = path.join(packageDir, 'package.json');
+      if (!fs.existsSync(packageFile)) continue;
+      try {
+        const bin = JSON.parse(fs.readFileSync(packageFile, 'utf8')).bin?.gemini;
+        if (typeof bin !== 'string') continue;
+        const entry = path.resolve(packageDir, bin);
+        if (entry.startsWith(path.resolve(packageDir) + path.sep) && fs.existsSync(entry)) return entry;
+      } catch { /* This is not the standard npm Gemini CLI install. */ }
+    }
   }
   return null;
 }
