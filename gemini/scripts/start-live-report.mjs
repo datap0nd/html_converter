@@ -6,7 +6,8 @@ import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { root, inputDir, workDir, dynamicDir, discover, writeJson, readJson } from './core.mjs';
 import { loadLocalEnv } from './env.mjs';
-import { runGeminiAsync } from './gemini.mjs';
+import { runGeminiAsync, parseGeminiOutput } from './gemini.mjs';
+import { prepareSourceContext } from './context.mjs';
 import { inputFingerprint, captureArtifacts, artifactsMatch, saveCheckpoint } from './checkpoints.mjs';
 
 const phases = [
@@ -70,24 +71,29 @@ export function reportPathIsInScope(relativePath, selectedPageIds) {
   return selectedPageIds.has(pageId);
 }
 
-function createGeminiWorkspace(inventory, scope) {
+export function createGeminiWorkspace(inventory, scope, { sourceRoot = root, sourceInput = inputDir } = {}) {
   const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'html-converter-gemini-'));
   for (const folder of ['input', 'work', 'prompts', 'skills', 'scripts', 'output/dynamic']) fs.mkdirSync(path.join(stage, folder), { recursive: true });
-  for (const name of ['GEMINI.md']) fs.copyFileSync(path.join(root, name), path.join(stage, name));
-  for (const folder of ['prompts', 'skills']) fs.cpSync(path.join(root, folder), path.join(stage, folder), { recursive: true });
-  for (const name of ['core.mjs', 'sources.mjs']) fs.copyFileSync(path.join(root, 'scripts', name), path.join(stage, 'scripts', name));
+  for (const name of ['GEMINI.md', '.geminiignore']) fs.copyFileSync(path.join(sourceRoot, name), path.join(stage, name));
+  fs.mkdirSync(path.join(stage, '.gemini'));
+  fs.copyFileSync(path.join(sourceRoot, '.gemini', 'settings.json'), path.join(stage, '.gemini', 'settings.json'));
+  for (const folder of ['prompts', 'skills']) fs.cpSync(path.join(sourceRoot, folder), path.join(stage, folder), { recursive: true });
+  for (const name of ['core.mjs', 'sources.mjs']) fs.copyFileSync(path.join(sourceRoot, 'scripts', name), path.join(stage, 'scripts', name));
   const selectedPageIds = new Set(inventory.pages.map(page => page.id));
-  fs.cpSync(inputDir, path.join(stage, 'input'), {
+  fs.cpSync(sourceInput, path.join(stage, 'input'), {
     recursive: true,
     filter: source => {
-      const rel = path.relative(inputDir, source).replaceAll('\\', '/');
+      const rel = path.relative(sourceInput, source).replaceAll('\\', '/');
       if (!rel) return true;
       if (fs.lstatSync(source).isSymbolicLink()) return false;
       if (/^data(?:\/|$)/i.test(rel)) return false;
+      if (/(?:^|\/)(?:\.git|\.pbi)(?:\/|$)/i.test(rel)) return false;
       if (!reportPathIsInScope(`/${rel}`, selectedPageIds)) return false;
       return fs.statSync(source).isDirectory() || /\.(?:pbip|pbir|tmdl|m|pq|bim|json)$/i.test(rel);
     }
   });
+  const context = prepareSourceContext(stage);
+  console.log(`Source context: ${context.sourceFileCount} definition files in ${context.packets.length} bounded packet(s); ${context.largeFiles.length} large file(s) indexed separately.`);
   writeJson(path.join(stage, 'work', 'inventory.json'), inventory);
   fs.copyFileSync(path.join(scope.workDir, 'live-run.json'), path.join(stage, 'work', 'live-run.json'));
   for (const rel of ['work/live-interpretation.json', 'work/live-build.json', 'work/live-review.json', 'work/live-final-review.json', 'output/dynamic/index.html', 'output/dynamic/backend.mjs']) {
@@ -104,9 +110,8 @@ function removeGeminiWorkspace(stage) {
 }
 
 export function geminiFailureDetail(result, env = {}) {
-  let parsed;
-  try { parsed = JSON.parse(result.stdout ?? ''); } catch {}
-  const message = parsed?.error?.message || parsed?.error?.details || result.stderr?.trim() || result.stdout?.trim() || result.error?.message || 'No diagnostic text from Gemini CLI.';
+  const parsed = parseGeminiOutput(result.stdout);
+  const message = parsed?.error?.message || parsed?.error?.details || result.error?.message || result.stderr?.trim() || result.stdout?.trim() || 'No diagnostic text from Gemini CLI.';
   let detail = typeof message === 'string' ? message : JSON.stringify(message);
   for (const [key, value] of Object.entries(env)) {
     if (/(PASSWORD|SECRET|TOKEN|API_KEY|CONNECTION_STRING)/i.test(key) && typeof value === 'string' && value.length > 3) detail = detail.replaceAll(value, '[redacted]');
@@ -115,7 +120,11 @@ export function geminiFailureDetail(result, env = {}) {
 }
 
 function geminiFailureText(result) {
-  return [result?.status, result?.error?.message, result?.stderr, result?.stdout].filter(value => value !== undefined && value !== null).join('\n');
+  const parsed = parseGeminiOutput(result?.stdout);
+  // A source file or tool result mentioning "429" is not a provider failure.
+  const structuredError = parsed.error ? JSON.stringify(parsed.error) : '';
+  const plainOutput = result?.stdout && !result.stdout.trimStart().startsWith('{') ? result.stdout : '';
+  return [result?.status, result?.error?.message, result?.stderr, structuredError, plainOutput].filter(value => value !== undefined && value !== null).join('\n');
 }
 
 export function isTransientGeminiFailure(result) {
@@ -130,8 +139,7 @@ export function geminiRetryDelayMs(result, failedAttempt) {
 }
 
 export function geminiResponseArtifact(stdout) {
-  let envelope;
-  try { envelope = JSON.parse(stdout ?? ''); } catch { return null; }
+  const envelope = parseGeminiOutput(stdout);
   const response = envelope?.response;
   if (response && typeof response === 'object' && !Array.isArray(response)) return response;
   if (typeof response !== 'string') return null;
@@ -144,7 +152,8 @@ export function geminiResponseArtifact(stdout) {
 
 function missingPhaseOutputs(name, expected, stage) {
   const missing = [];
-  if (!readJson(expected)) missing.push(path.relative(stage, expected).replaceAll('\\', '/'));
+  const artifact = readJson(expected);
+  if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)) missing.push(path.relative(stage, expected).replaceAll('\\', '/'));
   if (name === '02-build' || name.startsWith('04-page-')) {
     for (const file of ['index.html', 'backend.mjs']) if (!fs.existsSync(path.join(stage, 'output', 'dynamic', file))) missing.push(`output/dynamic/${file}`);
   }
@@ -170,37 +179,63 @@ export function validateLiveReport(inventory, markup, review, env = {}) {
   return issues;
 }
 
-async function runPhase([name, promptFile, expectedFile], model, runDir, stage, env, scope) {
+export async function runPhase([name, promptFile, expectedFile], model, runDir, stage, env, scope, {
+  invoke = runGeminiAsync, now = Date.now, sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+} = {}) {
   const expected = path.join(stage, expectedFile);
   console.log(`[${name}] Gemini ${model} starting...`);
-  const prompt = `Read ${promptFile}, work/live-run.json, work/inventory.json, and the relevant PBIP files. Follow the phase instructions exactly. Do not read .env or run shell commands. You MUST use the file-editing capability to write ${expectedFile}; do not merely print its contents in your response.`;
+  const prompt = `Read ${promptFile}, work/live-run.json, work/inventory.json, and work/source-context.json. Read the source packets relevant to this phase instead of discovering and reading individual PBIP files again. Each packet preserves original source text and paths; follow large-file pointers when needed. Do not reread originals already covered by a packet unless output was truncated. Follow the phase instructions exactly. Do not read .env or run shell commands. You MUST use the file-editing capability to write ${expectedFile}; do not merely print its contents in your response. Write concise artifacts, then stop.`;
   const maxAttempts = 5;
   const phaseBudgetMs = (scope.pageLimit ? 15 : 40) * 60 * 1000;
   const perAttemptMs = (scope.pageLimit ? 10 : 20) * 60 * 1000;
-  const phaseDeadline = Date.now() + phaseBudgetMs;
+  const started = now();
+  const phaseDeadline = started + phaseBudgetMs;
+  const generatedFiles = ['output/dynamic/index.html', 'output/dynamic/backend.mjs'];
+  const editsReport = name === '02-build' || name.startsWith('04-page-');
+  const attemptFiles = [expectedFile, ...(editsReport ? generatedFiles : [])];
+  if (fs.existsSync(expected)) fs.unlinkSync(expected);
+  if (name === '02-build') {
+    for (const file of generatedFiles) fs.rmSync(path.join(stage, file), { force: true });
+  } else if (name.startsWith('04-page-')) {
+    for (const file of generatedFiles) fs.copyFileSync(persistedPath(scope, file), path.join(stage, file));
+  }
+  const snapshot = () => new Map(attemptFiles.filter(file => fs.existsSync(path.join(stage, file))).map(file => [file, fs.readFileSync(path.join(stage, file))]));
+  let baseline = snapshot();
+  const restore = () => {
+    for (const file of attemptFiles) {
+      if (baseline.has(file)) fs.writeFileSync(path.join(stage, file), baseline.get(file));
+      else fs.rmSync(path.join(stage, file), { force: true });
+    }
+  };
   let result;
   let missing = [];
   let deadlineExceeded = false;
+  let incompleteAttempts = 0;
+  let transientFailures = 0;
+  let attempts = 0;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const remainingMs = phaseDeadline - Date.now();
+    const remainingMs = phaseDeadline - now();
     if (remainingMs <= 0) { deadlineExceeded = true; break; }
-    if (fs.existsSync(expected)) fs.unlinkSync(expected);
-    if (name === '02-build') {
-      for (const file of ['index.html', 'backend.mjs']) {
-        const staged = path.join(stage, 'output', 'dynamic', file);
-        if (fs.existsSync(staged)) fs.unlinkSync(staged);
-      }
-    } else if (name.startsWith('04-page-')) {
-      for (const file of ['index.html', 'backend.mjs']) fs.copyFileSync(path.join(scope.dynamicDir, file), path.join(stage, 'output', 'dynamic', file));
-    }
+    restore();
+    attempts = attempt;
     if (attempt > 1) console.log(`[${name}] Gemini retry ${attempt} of ${maxAttempts}...`);
-    const repairInstruction = attempt > 1 && missing.length ? ` Previous attempt ${attempt - 1} exited without producing these required files: ${missing.join(', ')}. Complete the phase and write every required file now.` : '';
-    result = await runGeminiAsync(['--model', model, '--skip-trust', '-e', 'none', '--approval-mode', 'auto_edit', '--output-format', 'json', '-p', prompt + repairInstruction], {
-      cwd: stage, timeout: Math.min(perAttemptMs, remainingMs), onHeartbeat: message => console.log(`[${name}] ${message}`)
-    });
     const suffix = attempt === 1 ? '' : `.attempt-${attempt}`;
-    fs.writeFileSync(path.join(runDir, `${name}${suffix}.stdout.json`), result.stdout ?? '');
-    fs.writeFileSync(path.join(runDir, `${name}${suffix}.stderr.log`), result.stderr ?? '');
+    const logBase = path.join(runDir, `${name}${suffix}`);
+    fs.writeFileSync(`${logBase}.stdout.jsonl`, '');
+    fs.writeFileSync(`${logBase}.stderr.log`, '');
+    const attemptPrompt = missing.length ? `Read ${promptFile} and work/inventory.json. This is a continuation. Existing output files from the last successful attempt are retained. Inspect them and finish only what is missing: ${missing.join(', ')}. Do not regenerate completed HTML/backend or repeat the source analysis solely to write the JSON summary. Consult work/source-context.json only for unresolved details. Do not read .env or run shell commands. Write the required files, then stop.` : prompt;
+    result = await invoke(['--model', model, '--skip-trust', '-e', 'none', '--approval-mode', 'auto_edit', '--output-format', 'stream-json', '-p', attemptPrompt], {
+      cwd: stage, timeout: Math.min(perAttemptMs, remainingMs), idleTimeoutMs: 180_000,
+      onHeartbeat: message => console.log(`[${name}] ${message}`),
+      onStdout: chunk => fs.appendFileSync(`${logBase}.stdout.jsonl`, chunk),
+      onStderr: chunk => fs.appendFileSync(`${logBase}.stderr.log`, chunk)
+    });
+    // Also supports injected/older launchers that return output without callbacks.
+    if (!fs.statSync(`${logBase}.stdout.jsonl`).size) fs.writeFileSync(`${logBase}.stdout.jsonl`, result.stdout ?? '');
+    if (!fs.statSync(`${logBase}.stderr.log`).size) fs.writeFileSync(`${logBase}.stderr.log`, result.stderr ?? '');
+    const parsed = parseGeminiOutput(result.stdout);
+    if (!result.error && parsed.error) result.error = new Error(geminiFailureDetail(result, env));
+    writeJson(`${logBase}.metrics.json`, { ...result.metrics, attempt, status: result.status, phaseElapsedMs: now() - started, stats: parsed.stats });
     if (!result.error && result.status === 0) {
       if (!readJson(expected)) {
         const recovered = geminiResponseArtifact(result.stdout);
@@ -208,22 +243,33 @@ async function runPhase([name, promptFile, expectedFile], model, runDir, stage, 
       }
       missing = missingPhaseOutputs(name, expected, stage);
       if (!missing.length) break;
-      if (attempt < maxAttempts) {
-        console.log(`[${name}] Gemini exited successfully but omitted ${missing.join(', ')}. Retrying the incomplete phase without checkpointing it.`);
+      baseline = snapshot();
+      incompleteAttempts++;
+      if (attempt < maxAttempts && incompleteAttempts < 2) {
+        console.log(`[${name}] Missing ${missing.join(', ')}. Continuing from existing files; completed output will not be rebuilt.`);
         continue;
       }
       break;
     }
     if (!isTransientGeminiFailure(result) || attempt === maxAttempts) break;
-    const delayMs = geminiRetryDelayMs(result, attempt);
-    if (Date.now() + delayMs >= phaseDeadline) { deadlineExceeded = true; break; }
+    const delayMs = geminiRetryDelayMs(result, ++transientFailures);
+    if (now() + delayMs >= phaseDeadline) { deadlineExceeded = true; break; }
     console.log(`[${name}] Gemini returned a transient 429/capacity error. Retrying in ${Math.round(delayMs / 1000)} seconds; saved converter checkpoints are unchanged.`);
-    await new Promise(resolve => setTimeout(resolve, delayMs));
+    await sleep(delayMs);
   }
-  if (deadlineExceeded) throw new Error(`${name}: phase time budget exhausted after ${Math.round(phaseBudgetMs / 60000)} minutes. Progress before this phase is saved. See ${path.relative(root, runDir)}.`);
-  if (result.error || result.status !== 0) throw new Error(`${name}: Gemini failed${isTransientGeminiFailure(result) ? ' after rate-limit retries' : ''} (${result.error?.message ?? `exit ${result.status}`}). ${geminiFailureDetail(result, env)} Full logs: ${path.relative(root, runDir)}/${name}*.stderr.log and .stdout.json.`);
   missing = missingPhaseOutputs(name, expected, stage);
-  if (missing.length) throw new Error(`${name}: Gemini completed ${maxAttempts} attempts without producing ${missing.join(', ')}. Progress before this phase is saved. See ${path.relative(root, runDir)}.`);
+  if (deadlineExceeded || result?.error || result?.status !== 0 || missing.length) {
+    // Keep unapproved partial files for diagnosis, never publish or checkpoint them.
+    for (const [file, contents] of snapshot()) {
+      const target = path.join(runDir, `${name}.partial`, file);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, contents);
+    }
+    restore();
+    const reason = deadlineExceeded ? `cannot retry within the ${phaseBudgetMs / 60000}-minute phase budget` : result?.error || result?.status !== 0 ? 'Gemini failed' : `missing ${missing.join(', ')}`;
+    const detail = result?.error || result?.status !== 0 ? geminiFailureDetail(result ?? {}, env) : `Required files still missing: ${missing.join(', ')}`;
+    throw new Error(`${name}: ${reason} after ${attempts} attempt(s), ${Math.round((now() - started) / 1000)}s. ${detail} Progress before this phase is saved. Partial files and live logs: ${path.relative(root, runDir)}/${name}*.`);
+  }
   const persistedExpected = persistedPath(scope, expectedFile);
   fs.mkdirSync(path.dirname(persistedExpected), { recursive: true });
   fs.copyFileSync(expected, persistedExpected);
@@ -236,7 +282,7 @@ async function runPhase([name, promptFile, expectedFile], model, runDir, stage, 
       fs.copyFileSync(source, path.join(scope.dynamicDir, file));
     }
   }
-  console.log(`[${name}] Complete.`);
+  console.log(`[${name}] Complete in ${Math.round((now() - started) / 1000)}s (${attempts} attempt(s)).`);
 }
 
 async function loadBackend(file, env) {
@@ -360,10 +406,19 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
     const stage = createGeminiWorkspace(inventory, scope);
     try {
       let upstreamChanged = false;
-      for (const phase of phases) {
+      for (const [phaseIndex, phase] of phases.entries()) {
         const [name] = phase;
+        if (name === '03-review' && (state.reviewPending || Object.keys(state.repairs).length || reportCoverage(inventory, fs.readFileSync(htmlFile, 'utf8')).some(page => page.missingPage || page.missingVisuals.length))) {
+          console.log('[03-review] Deferring independent review until coverage repairs finish.');
+          continue;
+        }
         const valid = !upstreamChanged && artifactsMatch(root, state.phases[name]?.artifacts);
         if (valid) { console.log(`[${name}] Reusing completed artifact.`); continue; }
+        // Persist invalidation before a call that may fail. Otherwise a restart
+        // can reuse an old downstream build/review after its inputs changed.
+        for (const [downstream] of phases.slice(phaseIndex)) delete state.phases[downstream];
+        delete state.phases['05-final-review'];
+        saveCheckpoint(stateFile, state);
         if (name === '02-build') {
           for (const [file, backup] of [[htmlFile, 'previous-index.html'], [backendFile, 'previous-backend.mjs']]) {
             if (fs.existsSync(file)) fs.copyFileSync(file, path.join(runDir, backup));
@@ -397,6 +452,10 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
             const name = `04-page-${safePageId}-${batchIndex++}`;
             const artifact = `work/page-repair-${safePageId}-${batchIndex}.json`;
             console.log(`[${name}] Repairing ${batch.length} visual(s) on ${page.name}; ${currentPage.remainingVisualCount} queued.`);
+            state.reviewPending = true;
+            delete state.phases['03-review'];
+            delete state.phases['05-final-review'];
+            saveCheckpoint(stateFile, state);
             await runPhase([name, 'prompts/live-04-page-repair.md', artifact], model, runDir, stage, env, scope);
             const persistedArtifact = persistedPath(scope, artifact);
             const repair = readJson(persistedArtifact);
@@ -413,10 +472,12 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
           }
         }
       }
-      if (Object.keys(state.repairs).length && !artifactsMatch(root, state.phases['05-final-review']?.artifacts)) {
+      if ((state.reviewPending || Object.keys(state.repairs).length) && !artifactsMatch(root, state.phases['05-final-review']?.artifacts)) {
         const finalPhase = ['05-final-review', 'prompts/live-05-final-review.md', 'work/live-final-review.json'];
         await runPhase(finalPhase, model, runDir, stage, env, scope);
         recordPhase(state, '05-final-review', phaseArtifacts(scope, '05-final-review'), stateFile);
+        state.reviewPending = false;
+        saveCheckpoint(stateFile, state);
       }
     } finally { removeGeminiWorkspace(stage); }
   }
