@@ -6,7 +6,7 @@ import { makeSnapshot } from '../scripts/snapshot.mjs';
 import { runGemini, runGeminiAsync } from '../scripts/gemini.mjs';
 import { loadAllData, postgresQuery, postgresNativeQuery, listLiveSources, fetchLivePage } from '../scripts/sources.mjs';
 import { createLivePreview } from '../scripts/live-preview.mjs';
-import { validateLiveReport, geminiFailureDetail, isTransientGeminiFailure, geminiRetryDelayMs } from '../scripts/start-live-report.mjs';
+import { validateLiveReport, geminiFailureDetail, isTransientGeminiFailure, geminiRetryDelayMs, createRunScope, pageLimitFromArgs } from '../scripts/start-live-report.mjs';
 import { inputFingerprint, captureArtifacts, artifactsMatch, saveCheckpoint } from '../scripts/checkpoints.mjs';
 import { exportDesktopModel, modelExportData } from '../scripts/desktop-model.mjs';
 import fs from 'node:fs';
@@ -306,6 +306,18 @@ test('Gemini rate limits and capacity errors use bounded exponential retry delay
   assert.equal(geminiRetryDelayMs({ stderr: 'retryDelay: 12s' }, 1), 12_000);
   assert.equal(geminiRetryDelayMs({}, 1), 30_000);
   assert.equal(geminiRetryDelayMs({}, 5), 300_000);
+});
+
+test('two-page test scope is isolated from the all-pages conversion', () => {
+  const full = createRunScope();
+  const testScope = createRunScope(2);
+  assert.notEqual(testScope.workDir, full.workDir);
+  assert.notEqual(testScope.dynamicDir, full.dynamicDir);
+  assert.match(testScope.workDir.replaceAll('\\', '/'), /work\/scopes\/first-2-pages$/);
+  assert.match(testScope.dynamicDir.replaceAll('\\', '/'), /output\/first-2-pages\/dynamic$/);
+  assert.equal(pageLimitFromArgs(['--page-limit', '2']), 2);
+  assert.equal(pageLimitFromArgs([]), null);
+  assert.throws(() => pageLimitFromArgs(['--page-limit', 'none']), /positive integer/);
 });
 
 test('converter checkpoints survive restarts and invalidate when PBIP or artifacts change', () => {

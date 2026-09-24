@@ -15,12 +15,41 @@ const phases = [
   ['03-review', 'prompts/live-03-review.md', 'work/live-review.json']
 ];
 
-const phaseArtifacts = {
+const canonicalPhaseArtifacts = {
   '01-interpret': ['work/live-interpretation.json'],
   '02-build': ['work/live-build.json', 'output/dynamic/index.html', 'output/dynamic/backend.mjs'],
   '03-review': ['work/live-review.json'],
   '05-final-review': ['work/live-final-review.json']
 };
+
+export function createRunScope(pageLimit = null) {
+  if (pageLimit !== null && (!Number.isInteger(pageLimit) || pageLimit < 1)) throw new Error('Page limit must be a positive integer.');
+  const key = pageLimit ? `first-${pageLimit}-pages` : 'all-pages';
+  return {
+    key,
+    pageLimit,
+    workDir: pageLimit ? path.join(workDir, 'scopes', key) : workDir,
+    dynamicDir: pageLimit ? path.join(root, 'output', key, 'dynamic') : dynamicDir
+  };
+}
+
+export function pageLimitFromArgs(args) {
+  const index = args.indexOf('--page-limit');
+  if (index < 0) return null;
+  const value = Number(args[index + 1]);
+  if (!Number.isInteger(value) || value < 1) throw new Error('--page-limit requires a positive integer.');
+  return value;
+}
+
+function persistedPath(scope, canonical) {
+  if (canonical.startsWith('work/')) return path.join(scope.workDir, canonical.slice('work/'.length));
+  if (canonical.startsWith('output/dynamic/')) return path.join(scope.dynamicDir, canonical.slice('output/dynamic/'.length));
+  throw new Error(`Unsupported scoped artifact path: ${canonical}`);
+}
+
+function phaseArtifacts(scope, name) {
+  return canonicalPhaseArtifacts[name].map(canonical => path.relative(root, persistedPath(scope, canonical)).replaceAll('\\', '/'));
+}
 
 function reportCoverage(inventory, markup) {
   return inventory.pages.map(page => ({
@@ -30,7 +59,7 @@ function reportCoverage(inventory, markup) {
   }));
 }
 
-function createGeminiWorkspace(inventory) {
+function createGeminiWorkspace(inventory, scope) {
   const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'html-converter-gemini-'));
   for (const folder of ['input', 'work', 'prompts', 'skills', 'scripts', 'output/dynamic']) fs.mkdirSync(path.join(stage, folder), { recursive: true });
   for (const name of ['GEMINI.md']) fs.copyFileSync(path.join(root, name), path.join(stage, name));
@@ -47,9 +76,9 @@ function createGeminiWorkspace(inventory) {
     }
   });
   writeJson(path.join(stage, 'work', 'inventory.json'), inventory);
-  fs.copyFileSync(path.join(workDir, 'live-run.json'), path.join(stage, 'work', 'live-run.json'));
+  fs.copyFileSync(path.join(scope.workDir, 'live-run.json'), path.join(stage, 'work', 'live-run.json'));
   for (const rel of ['work/live-interpretation.json', 'work/live-build.json', 'work/live-review.json', 'work/live-final-review.json', 'output/dynamic/index.html', 'output/dynamic/backend.mjs']) {
-    const source = path.join(root, rel);
+    const source = persistedPath(scope, rel);
     if (fs.existsSync(source)) fs.copyFileSync(source, path.join(stage, rel));
   }
   return stage;
@@ -106,7 +135,7 @@ export function validateLiveReport(inventory, markup, review, env = {}) {
   return issues;
 }
 
-async function runPhase([name, promptFile, expectedFile], model, runDir, stage, env) {
+async function runPhase([name, promptFile, expectedFile], model, runDir, stage, env, scope) {
   const expected = path.join(stage, expectedFile);
   console.log(`[${name}] Gemini ${model} starting...`);
   const prompt = `Read ${promptFile}, work/live-run.json, work/inventory.json, and the relevant PBIP files. Follow the phase instructions exactly. Do not read .env or run shell commands. Write ${expectedFile}.`;
@@ -120,7 +149,7 @@ async function runPhase([name, promptFile, expectedFile], model, runDir, stage, 
         if (fs.existsSync(staged)) fs.unlinkSync(staged);
       }
     } else if (name.startsWith('04-page-')) {
-      for (const file of ['index.html', 'backend.mjs']) fs.copyFileSync(path.join(dynamicDir, file), path.join(stage, 'output', 'dynamic', file));
+      for (const file of ['index.html', 'backend.mjs']) fs.copyFileSync(path.join(scope.dynamicDir, file), path.join(stage, 'output', 'dynamic', file));
     }
     if (attempt > 1) console.log(`[${name}] Gemini retry ${attempt} of ${maxAttempts}...`);
     result = await runGeminiAsync(['--model', model, '--skip-trust', '-e', 'none', '--approval-mode', 'auto_edit', '--output-format', 'json', '-p', prompt], {
@@ -137,14 +166,16 @@ async function runPhase([name, promptFile, expectedFile], model, runDir, stage, 
   }
   if (result.error || result.status !== 0) throw new Error(`${name}: Gemini failed after rate-limit retries (${result.error?.message ?? `exit ${result.status}`}). ${geminiFailureDetail(result, env)} Full logs: ${path.relative(root, runDir)}/${name}*.stderr.log and .stdout.json.`);
   if (!fs.existsSync(expected) || !readJson(expected)) throw new Error(`${name}: expected valid JSON at ${expectedFile}. See run logs.`);
-  fs.copyFileSync(expected, path.join(root, expectedFile));
+  const persistedExpected = persistedPath(scope, expectedFile);
+  fs.mkdirSync(path.dirname(persistedExpected), { recursive: true });
+  fs.copyFileSync(expected, persistedExpected);
   if (name === '02-build' || name.startsWith('04-page-')) {
     for (const file of ['index.html', 'backend.mjs']) {
       if (!fs.existsSync(path.join(stage, 'output', 'dynamic', file))) throw new Error(`${name} did not produce output/dynamic/${file}.`);
     }
     for (const file of ['index.html', 'backend.mjs']) {
       const source = path.join(stage, 'output', 'dynamic', file);
-      fs.copyFileSync(source, path.join(dynamicDir, file));
+      fs.copyFileSync(source, path.join(scope.dynamicDir, file));
     }
   }
   console.log(`[${name}] Complete.`);
@@ -228,45 +259,47 @@ function priorInventoryMatches(previous, current) {
   return previous?.project === current.project && JSON.stringify(previous) === JSON.stringify(current);
 }
 
-function adoptPriorRun(state, inventory, previousInventory) {
-  if (!priorInventoryMatches(previousInventory, inventory) || !readJson(path.join(workDir, 'live-validation.json'))) return false;
+function adoptPriorRun(state, inventory, previousInventory, scope) {
+  if (scope.pageLimit || !priorInventoryMatches(previousInventory, inventory) || !readJson(path.join(scope.workDir, 'live-validation.json'))) return false;
   let adopted = false;
-  for (const [name, paths] of Object.entries(phaseArtifacts)) {
-    const artifacts = captureArtifacts(root, paths);
+  for (const name of Object.keys(canonicalPhaseArtifacts)) {
+    const artifacts = captureArtifacts(root, phaseArtifacts(scope, name));
     if (artifacts) { state.phases[name] = { completedAt: null, artifacts, adopted: true }; adopted = true; }
   }
   return adopted;
 }
 
-export async function runLiveReport({ preflightOnly = false, invokeGemini = true } = {}) {
+export async function runLiveReport({ preflightOnly = false, invokeGemini = true, pageLimit = null } = {}) {
   process.chdir(root);
   const env = loadLocalEnv();
-  const inventory = discover();
+  const discovered = discover();
+  const scope = createRunScope(pageLimit);
+  const inventory = pageLimit ? { ...discovered, pages: discovered.pages.slice(0, pageLimit), pageScope: { mode: scope.key, selectedPages: Math.min(pageLimit, discovered.pages.length), totalPages: discovered.pages.length } } : { ...discovered, pageScope: { mode: scope.key, selectedPages: discovered.pages.length, totalPages: discovered.pages.length } };
   if (!inventory.pages.length || !inventory.pages.some(page => page.visuals.length)) throw new Error('No enhanced PBIR pages/visuals found; cannot verify a generated report against this PBIP format.');
   if (inventory.reportModelReferences.some(x => x.kind === 'remote-connection')) throw new Error('PBIR references a remote semantic model. This no-Fabric workflow requires a local model definition.');
-  fs.mkdirSync(workDir, { recursive: true });
-  const previousInventory = readJson(path.join(workDir, 'inventory.json'));
-  writeJson(path.join(workDir, 'inventory.json'), inventory);
-  console.log(`Found ${inventory.pages.length} page(s), ${inventory.pages.reduce((n, p) => n + p.visuals.length, 0)} visual(s), ${inventory.postgresSources.length} PostgreSQL source(s), ${inventory.directCsvSources.length} direct CSV source(s), and ${inventory.unsupportedConnectors.length} other connector reference(s).`);
+  fs.mkdirSync(scope.workDir, { recursive: true });
+  const previousInventory = readJson(path.join(scope.workDir, 'inventory.json'));
+  writeJson(path.join(scope.workDir, 'inventory.json'), inventory);
+  console.log(`Scope: ${pageLimit ? `first ${inventory.pages.length} of ${discovered.pages.length} page(s)` : `all ${inventory.pages.length} page(s)`}. Found ${inventory.pages.reduce((n, p) => n + p.visuals.length, 0)} selected visual(s), ${inventory.postgresSources.length} PostgreSQL source(s), ${inventory.directCsvSources.length} direct CSV source(s), and ${inventory.unsupportedConnectors.length} other connector reference(s).`);
   if (preflightOnly) { console.log('PBIP scan passed. No Gemini call or source access made.'); return { inventory }; }
-  const stateFile = path.join(workDir, 'live-state.json');
+  const stateFile = path.join(scope.workDir, 'live-state.json');
   const fingerprint = inputFingerprint(inputDir);
   let state = readJson(stateFile);
   const hadState = state !== null;
   const fresh = process.argv.includes('--fresh');
   if (fresh || state?.version !== 1 || state?.inputFingerprint !== fingerprint) {
-    state = { version: 1, project: inventory.project, inputFingerprint: fingerprint, createdAt: new Date().toISOString(), phases: {}, repairs: {} };
-    if (!fresh && !hadState && adoptPriorRun(state, inventory, previousInventory)) console.log('Adopted completed artifacts from the previous converter run.');
+    state = { version: 1, project: inventory.project, scope: scope.key, inputFingerprint: fingerprint, createdAt: new Date().toISOString(), phases: {}, repairs: {} };
+    if (!fresh && !hadState && adoptPriorRun(state, inventory, previousInventory, scope)) console.log('Adopted completed artifacts from the previous converter run.');
     saveCheckpoint(stateFile, state);
   } else console.log('Resuming saved converter progress for the unchanged PBIP.');
-  const runDir = fs.mkdtempSync(path.join(workDir, 'live-run-'));
+  const runDir = fs.mkdtempSync(path.join(scope.workDir, 'live-run-'));
   const model = 'gemini-3.8-flash';
-  writeJson(path.join(workDir, 'live-run.json'), { project: inventory.project, startedAt: new Date().toISOString(), model, runLog: path.relative(root, runDir).replaceAll('\\', '/') });
-  const htmlFile = path.join(dynamicDir, 'index.html');
-  const backendFile = path.join(dynamicDir, 'backend.mjs');
-  fs.mkdirSync(dynamicDir, { recursive: true });
+  writeJson(path.join(scope.workDir, 'live-run.json'), { project: inventory.project, scope: scope.key, startedAt: new Date().toISOString(), model, runLog: path.relative(root, runDir).replaceAll('\\', '/') });
+  const htmlFile = path.join(scope.dynamicDir, 'index.html');
+  const backendFile = path.join(scope.dynamicDir, 'backend.mjs');
+  fs.mkdirSync(scope.dynamicDir, { recursive: true });
   if (invokeGemini) {
-    const stage = createGeminiWorkspace(inventory);
+    const stage = createGeminiWorkspace(inventory, scope);
     try {
       let upstreamChanged = false;
       for (const phase of phases) {
@@ -281,15 +314,15 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
           }
           state.repairs = {};
         }
-        await runPhase(phase, model, runDir, stage, env);
-        recordPhase(state, name, phaseArtifacts[name], stateFile);
+        await runPhase(phase, model, runDir, stage, env, scope);
+        recordPhase(state, name, phaseArtifacts(scope, name), stateFile);
         upstreamChanged = true;
         if (name !== '03-review') delete state.phases['05-final-review'];
       }
-      let review = readJson(path.join(workDir, 'live-review.json'));
+      let review = readJson(path.join(scope.workDir, 'live-review.json'));
       let markup = fs.readFileSync(htmlFile, 'utf8');
       let issues = validateLiveReport(inventory, markup, review, env);
-      writeJson(path.join(workDir, 'live-validation.json'), { passed: issues.length === 0, issues, reviewStatus: review?.status });
+      writeJson(path.join(scope.workDir, 'live-validation.json'), { passed: issues.length === 0, issues, reviewStatus: review?.status });
       const incomplete = reportCoverage(inventory, markup).filter(page => page.missingPage || page.missingVisuals.length);
       if (incomplete.length) {
         console.log(`Coverage incomplete: ${incomplete.length} page(s) need focused repair. Completed phases will not restart.`);
@@ -306,9 +339,10 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
             const name = `04-page-${safePageId}-${batchIndex++}`;
             const artifact = `work/page-repair-${safePageId}-${batchIndex}.json`;
             console.log(`[${name}] Repairing ${batch.length} visual(s) on ${page.name}; ${currentPage.remainingVisualCount} queued.`);
-            await runPhase([name, 'prompts/live-04-page-repair.md', artifact], model, runDir, stage, env);
-            const repair = readJson(path.join(root, artifact));
-            recordPhase(state, '02-build', phaseArtifacts['02-build'], stateFile);
+            await runPhase([name, 'prompts/live-04-page-repair.md', artifact], model, runDir, stage, env, scope);
+            const persistedArtifact = persistedPath(scope, artifact);
+            const repair = readJson(persistedArtifact);
+            recordPhase(state, '02-build', phaseArtifacts(scope, '02-build'), stateFile);
             delete state.phases['05-final-review'];
             saveCheckpoint(stateFile, state);
             const after = reportCoverage({ pages: [page] }, fs.readFileSync(htmlFile, 'utf8'))[0];
@@ -316,37 +350,37 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
             if (repair?.status !== 'complete' || after.missingPage || batch.some(visual => stillMissing.has(visual.id))) {
               throw new Error(`${name} remains incomplete. Progress is saved; the next setup run resumes this page. See ${artifact}.`);
             }
-            state.repairs[page.id] = { completedAt: new Date().toISOString(), artifact, remainingVisualCount: after.missingVisuals.length };
+            state.repairs[page.id] = { completedAt: new Date().toISOString(), artifact: path.relative(root, persistedArtifact).replaceAll('\\', '/'), remainingVisualCount: after.missingVisuals.length };
             saveCheckpoint(stateFile, state);
           }
         }
       }
       if (Object.keys(state.repairs).length && !artifactsMatch(root, state.phases['05-final-review']?.artifacts)) {
         const finalPhase = ['05-final-review', 'prompts/live-05-final-review.md', 'work/live-final-review.json'];
-        await runPhase(finalPhase, model, runDir, stage, env);
-        recordPhase(state, '05-final-review', phaseArtifacts['05-final-review'], stateFile);
+        await runPhase(finalPhase, model, runDir, stage, env, scope);
+        recordPhase(state, '05-final-review', phaseArtifacts(scope, '05-final-review'), stateFile);
       }
     } finally { removeGeminiWorkspace(stage); }
   }
   const finalReviewValid = artifactsMatch(root, state.phases['05-final-review']?.artifacts);
-  const review = finalReviewValid ? readJson(path.join(workDir, 'live-final-review.json')) : readJson(path.join(workDir, 'live-review.json'));
+  const review = finalReviewValid ? readJson(path.join(scope.workDir, 'live-final-review.json')) : readJson(path.join(scope.workDir, 'live-review.json'));
   const issues = validateLiveReport(inventory, fs.readFileSync(htmlFile, 'utf8'), review, env);
-  writeJson(path.join(workDir, 'live-validation.json'), { passed: issues.length === 0, issues, reviewStatus: review?.status });
-  if (issues.length) throw new Error(`Generated report failed validation: ${summarizeValidation(issues)}. Progress is saved. See work/live-validation.json and ${path.relative(root, runDir)}.`);
+  writeJson(path.join(scope.workDir, 'live-validation.json'), { passed: issues.length === 0, issues, reviewStatus: review?.status });
+  if (issues.length) throw new Error(`Generated report failed validation: ${summarizeValidation(issues)}. Progress is saved. See ${path.relative(root, path.join(scope.workDir, 'live-validation.json'))} and ${path.relative(root, runDir)}.`);
   const backend = await loadBackend(backendFile, env);
   let preflight;
   try { preflight = await checkBackend(backend, inventory); }
   catch (error) {
-    writeJson(path.join(workDir, 'live-preflight.json'), { ok: false, issues: [error.message] });
+    writeJson(path.join(scope.workDir, 'live-preflight.json'), { ok: false, issues: [error.message] });
     throw error;
   }
-  writeJson(path.join(workDir, 'live-preflight.json'), preflight);
-  console.log(`Gemini review: ${review.status}. ${review.limitations.length} limitation(s), ${review.unverified.length} unverified behavior(s). See work/${finalReviewValid ? 'live-final-review' : 'live-review'}.json.`);
+  writeJson(path.join(scope.workDir, 'live-preflight.json'), preflight);
+  console.log(`Gemini review: ${review.status}. ${review.limitations.length} limitation(s), ${review.unverified.length} unverified behavior(s). See ${path.relative(root, path.join(scope.workDir, finalReviewValid ? 'live-final-review.json' : 'live-review.json'))}.`);
   return { inventory, review, server: startServer(htmlFile, backend, inventory) };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  runLiveReport({ preflightOnly: process.argv.includes('--preflight') }).catch(error => {
+  Promise.resolve().then(() => runLiveReport({ preflightOnly: process.argv.includes('--preflight'), pageLimit: pageLimitFromArgs(process.argv.slice(2)) })).catch(error => {
     console.error(`Report conversion stopped: ${error.message}`);
     process.exitCode = 1;
   });

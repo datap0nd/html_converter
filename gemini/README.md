@@ -8,6 +8,8 @@ Put one complete PBIP project (`*.pbip` plus its `.Report` and `.SemanticModel` 
 
 That one command updates the code from GitHub, preserves your `input/`, `.env`, `output/`, `work/`, and logs, installs the checked-in Node dependencies, then runs the converter. The stable `setup.ps1` launcher does not need routine edits; the downloaded `live-setup.ps1` and the npm `start` command control the current workflow. If the window closes, `logs/latest.txt` names the persistent setup log. Stop a previous server with Ctrl+C before starting another.
 
+The first question asks whether to convert the first two report pages end to end or all report pages end to end. Enter `1` (also the default) for the two-page test, or `2` for the complete report. The test is fully isolated: its output is `output/first-2-pages/dynamic/` and its checkpoints/logs are under `work/scopes/first-2-pages/`. The all-pages run continues to use `output/dynamic/` and `work/live-state.json`, so testing two pages cannot overwrite or reset an existing full-report conversion.
+
 The workflow uses your existing globally installed Gemini CLI and is pinned to `gemini-3.8-flash`; it does not install another Gemini CLI inside the repository. A `GEMINI_MODEL` value left in an existing `.env` is ignored.
 
 The converter does not run a separate `gemini --version` startup probe. Some Windows/proxy environments make that harmless command hang; the converter launches the required phase directly and reports its real output if it cannot start.

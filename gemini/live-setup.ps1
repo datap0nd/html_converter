@@ -18,6 +18,7 @@ $GeminiDir = [System.IO.Path]::GetFullPath($PSScriptRoot)
 $UserAgent = 'html_converter-setup'
 $Headers = @{ 'User-Agent' = $UserAgent }
 $TempRoot = $null
+$SelectedPageScope = if ($env:HC_PAGE_SCOPE) { $env:HC_PAGE_SCOPE } else { 'Prompt' }
 
 function Assert-ChildPath {
     param([string]$Parent, [string]$Child)
@@ -121,6 +122,21 @@ try {
     if (-not (Test-Path -LiteralPath (Join-Path $GeminiDir 'package.json'))) {
         throw 'Run setup.ps1 from inside the html_converter/gemini folder.'
     }
+    if (-not $NoRun) {
+        if ($SelectedPageScope -eq 'Prompt') {
+            Write-Host ''
+            Write-Host 'What should this run convert?' -ForegroundColor Cyan
+            Write-Host '  [1] First 2 report pages, end to end (test)' -ForegroundColor Green
+            Write-Host '  [2] All report pages, end to end'
+            do {
+                $choice = Read-Host 'Choose 1 or 2 [default: 1]'
+                if ([string]::IsNullOrWhiteSpace($choice)) { $choice = '1' }
+            } until ($choice -in @('1', '2'))
+            $SelectedPageScope = if ($choice -eq '1') { 'First2' } else { 'All' }
+        }
+        if ($SelectedPageScope -notin @('First2', 'All')) { throw 'HC_PAGE_SCOPE must be First2 or All.' }
+        Write-Host "Selected conversion scope: $SelectedPageScope" -ForegroundColor Cyan
+    }
     Write-Host "html_converter live setup: $GeminiDir" -ForegroundColor Cyan
     if (-not $SkipUpdate) {
         $lockPath = Join-Path $GeminiDir 'package-lock.json'
@@ -183,7 +199,11 @@ try {
         Write-Host 'Starting Gemini report reconstruction and live HTML server (Ctrl+C to stop)...' -ForegroundColor Green
         Push-Location $GeminiDir
         try {
-            & npm.cmd start
+            if ($SelectedPageScope -eq 'First2') {
+                & npm.cmd start -- --page-limit 2
+            } else {
+                & npm.cmd start
+            }
             if ($LASTEXITCODE -ne 0) { throw "npm start failed (exit code $LASTEXITCODE)." }
         } finally { Pop-Location }
     }

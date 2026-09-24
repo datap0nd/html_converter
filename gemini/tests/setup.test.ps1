@@ -56,10 +56,24 @@ try {
     $priorPath = $env:PATH
     try {
         $env:PATH = "$testRoot$([System.IO.Path]::PathSeparator)$priorPath"
+        $env:HC_PAGE_SCOPE = 'All'
         & $shell -NoProfile -ExecutionPolicy Bypass -File $bootstrap -LiveScriptPath $liveSource -ArchivePath $zipPath -NoPause
         if ($LASTEXITCODE -ne 0) { throw "Launch setup exited $LASTEXITCODE" }
-    } finally { $env:PATH = $priorPath }
+    } finally {
+        $env:PATH = $priorPath
+        Remove-Item Env:HC_PAGE_SCOPE -ErrorAction SilentlyContinue
+    }
     if ((Get-Content -LiteralPath $npmCalled -Raw).Trim() -ne 'start') { throw 'setup.ps1 did not run npm start.' }
+    try {
+        $env:PATH = "$testRoot$([System.IO.Path]::PathSeparator)$priorPath"
+        $env:HC_PAGE_SCOPE = 'First2'
+        & $shell -NoProfile -ExecutionPolicy Bypass -File $bootstrap -LiveScriptPath $liveSource -ArchivePath $zipPath -NoPause
+        if ($LASTEXITCODE -ne 0) { throw "First2 setup exited $LASTEXITCODE" }
+    } finally {
+        $env:PATH = $priorPath
+        Remove-Item Env:HC_PAGE_SCOPE -ErrorAction SilentlyContinue
+    }
+    if ((Get-Content -LiteralPath $npmCalled -Raw).Trim() -ne 'start -- --page-limit 2') { throw 'First2 setup did not pass the page limit to npm start.' }
     $latestLog = (Get-Content -LiteralPath (Join-Path $installed 'logs/latest.txt') -Raw).Trim()
     if (-not (Test-Path -LiteralPath $latestLog)) { throw 'Persistent setup log missing.' }
     $logText = Get-Content -LiteralPath $latestLog -Raw
