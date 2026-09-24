@@ -70,15 +70,18 @@ function Invoke-ArchiveDownload {
 }
 
 function Get-LatestCommit {
+    $cacheBuster = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $apiHeaders = @{
         'User-Agent' = $UserAgent
         'Accept' = 'application/vnd.github+json'
         'X-GitHub-Api-Version' = '2022-11-28'
+        'Cache-Control' = 'no-cache, no-store'
+        'Pragma' = 'no-cache'
     }
     $lastError = $null
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         try {
-            $sha = [string](Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/commits/main" -Headers $apiHeaders -TimeoutSec 30).sha
+            $sha = [string](Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/commits/main?nocache=$cacheBuster-$attempt" -Headers $apiHeaders -TimeoutSec 30).sha
             if ($sha -notmatch '^[0-9a-fA-F]{40}$') { throw 'GitHub returned an invalid main commit.' }
             return $sha.ToLowerInvariant()
         } catch {

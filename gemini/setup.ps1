@@ -34,15 +34,18 @@ function Assert-LiveScript {
 }
 
 function Get-LatestCommit {
+    $cacheBuster = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $headers = @{
         'User-Agent' = $userAgent
         'Accept' = 'application/vnd.github+json'
         'X-GitHub-Api-Version' = '2022-11-28'
+        'Cache-Control' = 'no-cache, no-store'
+        'Pragma' = 'no-cache'
     }
     $lastError = $null
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         try {
-            $sha = [string](Invoke-RestMethod -Uri "https://api.github.com/repos/$repository/commits/main" -Headers $headers -TimeoutSec 30).sha
+            $sha = [string](Invoke-RestMethod -Uri "https://api.github.com/repos/$repository/commits/main?nocache=$cacheBuster-$attempt" -Headers $headers -TimeoutSec 30).sha
             if ($sha -notmatch '^[0-9a-fA-F]{40}$') { throw 'GitHub returned an invalid commit SHA.' }
             return $sha.ToLowerInvariant()
         } catch {
@@ -80,7 +83,7 @@ function Get-RemoteLiveScript {
         'Accept' = 'application/vnd.github+json'
         'X-GitHub-Api-Version' = '2022-11-28'
     }
-    $apiUrl = "https://api.github.com/repos/$repository/contents/gemini/live-setup.ps1?ref=$ref"
+    $apiUrl = "https://api.github.com/repos/$repository/contents/gemini/live-setup.ps1?ref=$ref&nocache=$cacheBuster"
     $response = Invoke-RestMethod -Uri $apiUrl -Headers $apiHeaders -TimeoutSec 60
     if ($response.encoding -ne 'base64' -or -not $response.content) { throw 'GitHub Contents API did not return the live script.' }
     $bytes = [Convert]::FromBase64String(($response.content -replace '\s', ''))
