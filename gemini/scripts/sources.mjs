@@ -110,6 +110,8 @@ function connectionConfig(source, env) {
 // Actionable advice for the PostgreSQL failures seen on corporate networks.
 export function postgresHint(error) {
   const text = `${error?.code ?? ''} ${error?.message ?? error ?? ''}`;
+  if (/PG_ALLOW_NATIVE_QUERIES/.test(text)) return 'The report runs its own SQL (Value.NativeQuery). Review that SQL (listed in work/inventory.json under postgresSources), then set PG_ALLOW_NATIVE_QUERIES=true in gemini/.env. It runs read-only.';
+  if (/PG_NATIVE_QUERY_PARAMS_JSON/.test(text)) return 'A native SQL query uses $1, $2 ... but the PBIP gives no literal values. Set PG_NATIVE_QUERY_PARAMS_JSON in gemini/.env as shown in .env.example.';
   if (/PG_USER|PG_PASSWORD/.test(text)) return 'Fill PG_USER and PG_PASSWORD in gemini/.env with a read-only login.';
   if (/28P01|password authentication failed/i.test(text)) return 'The database rejected PG_USER/PG_PASSWORD. Check them in gemini/.env (no quotes needed).';
   if (/self[- ]signed|unable to (?:get|verify) (?:local )?issuer|UNABLE_TO_VERIFY_LEAF_SIGNATURE|SELF_SIGNED_CERT|CERT_|certificate/i.test(text)) return 'TLS certificate not trusted. Set PG_SSL_CA_FILE in gemini/.env to your organization root CA (.pem/.crt). Use PG_SSL_MODE=disable only if your DBA approves unencrypted connections.';
@@ -139,6 +141,10 @@ export async function testPostgresConnection(source, env = {}, options = {}) {
     await client.query('SELECT 1');
     await client.query('COMMIT');
     return { host: config.host, port: config.port, database: config.database, user: config.user, ms: Date.now() - started };
+  } catch (error) {
+    const wrapped = new Error(`${config.host}:${config.port}/${config.database} as ${config.user}: ${error.message}`);
+    wrapped.code = error.code;
+    throw wrapped;
   } finally { try { await client.end(); } catch { /* already closed */ } }
 }
 

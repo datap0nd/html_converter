@@ -41,22 +41,33 @@ for (const element of document.querySelectorAll('[data-role="data"]')) {
 
 export function backendSource(inventory, digest, { broken = false, environmentIssue = false } = {}) {
   const csv = (digest?.sources?.directCsv ?? []).map(source => source.path);
+  const postgres = digest?.sources?.postgres ?? [];
   const dataVisuals = inventory.pages.flatMap(page => page.visuals.filter(visual => visual.role === 'data').map(visual => visual.id));
   return `import fs from 'node:fs';
 const CSV_FILES = ${JSON.stringify(csv)};
+const POSTGRES = ${JSON.stringify(postgres)};
 const DATA_VISUALS = new Set(${JSON.stringify(dataVisuals)});
 export async function createBackend({ env, helpers }) {
   ${broken ? 'const broken = ;' : ''}
+  const sources = POSTGRES.length ? helpers.sources.listLiveSources({ postgresSources: POSTGRES }, env) : [];
   return {
     async healthcheck() {
       ${environmentIssue ? "return { ok: false, issues: ['PG_PASSWORD is empty in .env (test scenario).'] };" : ''}
       const issues = CSV_FILES.filter(file => !fs.existsSync(file)).map(file => 'Cannot read ' + file);
-      return issues.length ? { ok: false, issues } : { ok: true, sources: CSV_FILES };
+      for (const connection of POSTGRES) {
+        try { await helpers.sources.testPostgresConnection(connection, env); }
+        catch (error) { issues.push('PostgreSQL ' + connection.server + ': ' + error.message); }
+      }
+      return issues.length ? { ok: false, issues } : { ok: true, sources: [...CSV_FILES, ...POSTGRES.map(item => item.server + '/' + item.database)] };
     },
     async query({ visualId, limit = 200 }) {
       if (!DATA_VISUALS.has(visualId)) throw new Error('Unknown visual ' + visualId);
+      if (sources.length) {
+        const page = await helpers.sources.fetchLivePage(sources[0], env, { limit: Math.min(limit, 200), offset: 0 });
+        return { rows: page.rows, columns: page.columns, placeholder: false, limitations: ['Test model output.'] };
+      }
       if (!CSV_FILES.length) return { rows: [], columns: [], placeholder: true, limitations: ['No CSV source in this fixture.'] };
-      const parsed = helpers.core.parseCsv(fs.readFileSync(CSV_FILES[0], 'utf8').replace(/^\\uFEFF/, ''));
+      const parsed = helpers.core.readCsvFile(CSV_FILES[0]);
       return { rows: parsed.rows.slice(0, limit), columns: parsed.columns, placeholder: false, limitations: ['Test model output.'] };
     }
   };

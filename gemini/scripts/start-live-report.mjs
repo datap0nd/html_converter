@@ -10,7 +10,7 @@ import { loadLocalEnv } from './env.mjs';
 import { runGeminiStream, geminiCliInfo, toolTarget, unsupportedFlag, formatBytes } from './gemini.mjs';
 import { inputFingerprint, captureArtifacts, artifactsMatch, saveCheckpoint } from './checkpoints.mjs';
 import { buildReportDigest, DIGEST_VERSION } from './digest.mjs';
-import { testPostgresConnection, postgresHint } from './sources.mjs';
+import { testPostgresConnection, postgresHint, listLiveSources } from './sources.mjs';
 import { log, startLogFile, currentLogFile, addSecretsFromEnv, redact, formatDuration } from './log.mjs';
 
 const MODEL = 'gemini-3.8-flash';
@@ -691,6 +691,9 @@ async function preflight(inventory, digest, env) {
   for (const source of inventory.postgresSources ?? []) {
     if (!env.PG_USER || !env.PG_PASSWORD) throw new ConversionError(`The report reads PostgreSQL ${source.server}/${source.database}, but PG_USER/PG_PASSWORD are empty.`, { phase: 'preflight', hint: `Open ${rel(path.join(root, '.env'))} and fill PG_USER and PG_PASSWORD with a read-only login, then rerun .\\setup.ps1.` });
     if (!fs.existsSync(path.join(root, 'node_modules', 'pg', 'package.json'))) throw new ConversionError('The PostgreSQL driver (pg) is not installed.', { phase: 'preflight', hint: 'Run npm install in the gemini folder (or rerun .\\setup.ps1 with Internet/npm access).' });
+    // Native SQL opt-in, positional parameters, and unparseable queries are policy checks, not connectivity.
+    try { listLiveSources({ postgresSources: [source] }, env); }
+    catch (error) { throw new ConversionError(`PostgreSQL ${source.server}/${source.database}: ${error.message}`, { phase: 'preflight', hint: `${postgresHint(error)} Nothing was sent to Gemini yet.` }); }
     if (env.HC_SKIP_SOURCE_PREFLIGHT === 'true') { log.warn('preflight', `Skipping PostgreSQL connection test for ${source.server}/${source.database} (HC_SKIP_SOURCE_PREFLIGHT=true).`); continue; }
     try {
       const info = await testPostgresConnection(source, env);

@@ -68,12 +68,12 @@ test('SalesPostgres: missing credentials stop the run before Gemini with the .en
 }));
 
 test('SalesPostgres: an unreachable database is reported with a network hint', () => inSandbox('SalesPostgres', ({ sandbox }) => {
-  const result = preflight(sandbox, { PG_HOST: '127.0.0.1', PG_PORT: '1', PG_USER: 'reader', PG_PASSWORD: 'secret-value', PG_SSL_MODE: 'disable' });
+  const result = preflight(sandbox, { PG_HOST: '127.0.0.1', PG_PORT: '1', PG_USER: 'reader', PG_PASSWORD: 'secret-value', PG_SSL_MODE: 'disable', PG_ALLOW_NATIVE_QUERIES: 'true' });
   assert.equal(result.code, 1);
   assert.match(result.stdout, /Cannot connect to PostgreSQL/);
   assert.match(result.stdout, /Nothing is listening at that host\/port|did not answer in time/);
   assert.doesNotMatch(result.stdout, /secret-value/);
-}, { PG_HOST: '127.0.0.1', PG_PORT: '1', PG_USER: 'reader', PG_PASSWORD: 'secret-value', PG_SSL_MODE: 'disable' }));
+}, { PG_HOST: '127.0.0.1', PG_PORT: '1', PG_USER: 'reader', PG_PASSWORD: 'secret-value', PG_SSL_MODE: 'disable', PG_ALLOW_NATIVE_QUERIES: 'true' }));
 
 test('EdgeCases: parameterised sources resolve through literal M parameters', () => inSandbox('EdgeCases', ({ core, sandbox }) => {
   const inventory = core.discover();
