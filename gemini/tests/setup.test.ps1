@@ -51,8 +51,9 @@ try {
     }
     if (Get-ChildItem -LiteralPath $installed -Directory -Filter '.setup-temp-*') { throw 'Temporary update directory was not cleaned up.' }
 
-    $npmCalled = Join-Path $testRoot 'npm-called.txt'
-    Set-Content -LiteralPath (Join-Path $testRoot 'npm.cmd') -Value "@echo off`r`necho %* > `"$npmCalled`"`r`n"
+    $nodeCalled = Join-Path $testRoot 'node-called.txt'
+    # A fake node.cmd first on PATH: answers the version probe and records the converter command line.
+    Set-Content -LiteralPath (Join-Path $testRoot 'node.cmd') -Value "@echo off`r`nif `"%~1`"==`"--version`" (`r`n  echo v22.0.0`r`n  exit /b 0`r`n)`r`necho %* > `"$nodeCalled`"`r`necho converter stderr line 1>&2`r`nexit /b 0`r`n"
     $priorPath = $env:PATH
     try {
         $env:PATH = "$testRoot$([System.IO.Path]::PathSeparator)$priorPath"
@@ -63,7 +64,8 @@ try {
         $env:PATH = $priorPath
         Remove-Item Env:HC_PAGE_SCOPE -ErrorAction SilentlyContinue
     }
-    if ((Get-Content -LiteralPath $npmCalled -Raw).Trim() -ne 'start') { throw 'setup.ps1 did not run npm start.' }
+    $called = (Get-Content -LiteralPath $nodeCalled -Raw).Trim()
+    if ($called -notmatch 'start-live-report\.mjs' -or $called -match 'page-limit') { throw "setup.ps1 did not run the full converter: $called" }
     try {
         $env:PATH = "$testRoot$([System.IO.Path]::PathSeparator)$priorPath"
         $env:HC_PAGE_SCOPE = 'First2'
@@ -73,11 +75,12 @@ try {
         $env:PATH = $priorPath
         Remove-Item Env:HC_PAGE_SCOPE -ErrorAction SilentlyContinue
     }
-    if ((Get-Content -LiteralPath $npmCalled -Raw).Trim() -ne 'start -- --page-limit 2') { throw 'First2 setup did not pass the page limit to npm start.' }
+    if ((Get-Content -LiteralPath $nodeCalled -Raw).Trim() -notmatch 'start-live-report\.mjs --page-limit 2') { throw 'First2 setup did not pass the page limit to the converter.' }
     $latestLog = (Get-Content -LiteralPath (Join-Path $installed 'logs/latest.txt') -Raw).Trim()
     if (-not (Test-Path -LiteralPath $latestLog)) { throw 'Persistent setup log missing.' }
     $logText = Get-Content -LiteralPath $latestLog -Raw
     if ($logText -notmatch 'Starting Gemini report reconstruction' -or $logText -notmatch 'Setup finished successfully') { throw 'Setup log lacks execution outcome.' }
+    if ($logText -notmatch 'converter stderr line') { throw 'Converter stderr was not shown or it aborted setup.' }
 
     $env:HC_SETUP_INSTALL_DEPS = '0'
     try {

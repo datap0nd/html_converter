@@ -29,7 +29,13 @@ const stateFile = process.env.FAKE_GEMINI_STATE;
 const state = stateFile && fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')) : { counts: {}, calls: [] };
 const count = state.counts[phase] ?? 0;
 state.counts[phase] = count + 1;
-state.calls.push({ phase, args: args.filter(value => value !== prompt), cwd });
+const call = { phase, args: args.filter(value => value !== prompt), cwd };
+if (switches.has('list-stage')) {
+  const walk = dir => fs.readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? walk(path.join(dir, entry.name)) : [path.relative(cwd, path.join(dir, entry.name)).replaceAll('\\', '/')]);
+  call.files = walk(cwd);
+  call.contents = Object.fromEntries(call.files.filter(file => file.startsWith('work/') || file.startsWith('input/')).map(file => [file, fs.readFileSync(path.join(cwd, file), 'utf8')]));
+}
+state.calls.push(call);
 if (stateFile) fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
 
 process.stderr.write('Warning: 256-color support not detected. Using a terminal with at least 256-color support is recommended for a better visual experience.\n');

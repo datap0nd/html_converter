@@ -11,6 +11,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# The progress bar makes Invoke-WebRequest many times slower in Windows PowerShell 5.1.
+$ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $Repository = 'datap0nd/html_converter'
@@ -92,6 +94,39 @@ function Get-LatestCommit {
     Write-Host "  WARNING: Could not resolve GitHub main: $lastError" -ForegroundColor Yellow
     Write-Host '  The branch download will use a unique cache-busting URL.' -ForegroundColor Yellow
     return $null
+}
+
+# Runs a native program and shows every output line as it arrives.
+# Windows PowerShell turns native stderr into terminating errors when
+# $ErrorActionPreference is Stop and output is redirected (as setup.ps1 does),
+# so stderr is folded into normal output here and only the exit code decides.
+function Invoke-NativeLogged {
+    param([string]$FilePath, [string[]]$Arguments)
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $FilePath @Arguments 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) { Write-Host $_.Exception.Message } else { Write-Host $_ }
+        }
+        return $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+}
+
+function Get-NodeCommand {
+    $node = Get-Command node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $node) {
+        throw 'Node.js was not found. Install Node.js 20 LTS or newer from https://nodejs.org (per-user install is fine), open a NEW PowerShell window, and rerun .\setup.ps1.'
+    }
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { $version = [string](& $node.Source --version 2>$null) } finally { $ErrorActionPreference = $previous }
+    if ($version -match '^v(\d+)\.' -and [int]$Matches[1] -lt 20) {
+        throw "Node.js $version is too old. Install Node.js 20 LTS or newer from https://nodejs.org, open a NEW PowerShell window, and rerun .\setup.ps1."
+    }
+    Write-Host "Node.js $version at $($node.Source)" -ForegroundColor DarkGray
+    return $node.Source
 }
 
 function Get-ArchiveViaBrowser {
@@ -188,27 +223,40 @@ try {
         $needsDependencies = $env:HC_SETUP_INSTALL_DEPS -eq '1'
     }
 
+    $nodePath = Get-NodeCommand
     if ($needsDependencies) {
         Write-Host 'Installing Node dependencies...' -ForegroundColor Cyan
+        $npm = Get-Command npm.cmd -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $npm) { $npm = Get-Command npm -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 }
+        if (-not $npm) { throw 'npm was not found next to Node.js. Reinstall Node.js 20 LTS or newer, open a NEW PowerShell window, and rerun .\setup.ps1.' }
         Push-Location $GeminiDir
         try {
-            & npm.cmd install --ignore-scripts --no-audit --no-fund
-            if ($LASTEXITCODE -ne 0) { throw "npm install failed (exit code $LASTEXITCODE)." }
+            $installExit = Invoke-NativeLogged -FilePath $npm.Source -Arguments @('install', '--ignore-scripts', '--no-audit', '--no-fund', '--loglevel', 'error')
+            if ($installExit -ne 0) { throw "npm install failed (exit code $installExit). Check proxy/npm registry access (npm config get registry), then rerun .\setup.ps1." }
         } finally { Pop-Location }
     }
     if ($NoRun) {
         Write-Host 'Update complete. Run .\setup.ps1 to update and start, or npm start to start now.' -ForegroundColor Green
     } else {
+        if (-not (Get-Command gemini -ErrorAction SilentlyContinue)) {
+            Write-Host 'WARNING: gemini was not found on PATH. Install it with: npm install -g @google/gemini-cli   then run gemini once to sign in.' -ForegroundColor Yellow
+        }
         Write-Host 'Starting Gemini report reconstruction and live HTML server (Ctrl+C to stop)...' -ForegroundColor Green
+        Write-Host 'Progress is printed live below and saved under gemini\logs.' -ForegroundColor DarkGray
+        $converterArgs = @('--no-warnings', (Join-Path (Join-Path $GeminiDir 'scripts') 'start-live-report.mjs'))
+        if ($SelectedPageScope -eq 'First2') { $converterArgs += @('--page-limit', '2') }
         Push-Location $GeminiDir
         try {
-            if ($SelectedPageScope -eq 'First2') {
-                & npm.cmd start -- --page-limit 2
-            } else {
-                & npm.cmd start
-            }
-            if ($LASTEXITCODE -ne 0) { throw "npm start failed (exit code $LASTEXITCODE)." }
+            $converterExit = Invoke-NativeLogged -FilePath $nodePath -Arguments $converterArgs
         } finally { Pop-Location }
+        # 130 / 0xC000013A: the report server was stopped with Ctrl+C.
+        if ($converterExit -in @(130, -1073741510, 3221225786)) {
+            Write-Host 'Report server stopped.' -ForegroundColor Cyan
+        } elseif ($converterExit -ne 0) {
+            $latest = Join-Path (Join-Path $GeminiDir 'logs') 'latest-converter-log.txt'
+            $logHint = if (Test-Path -LiteralPath $latest) { " Converter log: $((Get-Content -LiteralPath $latest -TotalCount 1).Trim())" } else { '' }
+            throw "Report conversion stopped (exit code $converterExit). The reason and what to do are printed above.$logHint"
+        }
     }
 } catch {
     Write-Host "SETUP FAILED: $($_.Exception.Message)" -ForegroundColor Red

@@ -885,7 +885,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
     preflightOnly: args.includes('--preflight'),
     pageLimit: pageLimitFromArgs(args),
     fresh: args.includes('--fresh'),
-    serve: !args.includes('--no-serve'),
+    serve: !args.includes('--no-serve') && process.env.HC_NO_SERVE !== 'true',
     port: portIndex >= 0 ? Number(args[portIndex + 1]) : undefined
   })).catch(error => {
     if (!currentLogFile()) {

@@ -9,6 +9,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $geminiDir = [System.IO.Path]::GetFullPath($PSScriptRoot)
 $logsDir = Join-Path $geminiDir 'logs'
@@ -159,8 +160,13 @@ try {
     if ($ArchivePath) { $arguments += @('-ArchivePath', $ArchivePath) }
     if ($SkipUpdate) { $arguments += '-SkipUpdate' }
     if ($sha -and -not $ArchivePath -and -not $SkipUpdate) { $arguments += @('-CommitSha', $sha) }
-    & $shell @arguments 2>&1 | ForEach-Object { Write-Host $_ }
+    # Native stderr must not become a terminating error under 'Stop' in Windows PowerShell 5.1.
+    $ErrorActionPreference = 'Continue'
+    & $shell @arguments 2>&1 | ForEach-Object {
+        if ($_ -is [System.Management.Automation.ErrorRecord]) { Write-Host $_.Exception.Message } else { Write-Host $_ }
+    }
     $exitCode = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
     if ($exitCode -ne 0) { throw "live-setup.ps1 exited with code $exitCode." }
     Write-Host 'Setup finished successfully.' -ForegroundColor Green
 } catch {
