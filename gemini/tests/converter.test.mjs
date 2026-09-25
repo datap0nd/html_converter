@@ -86,10 +86,13 @@ test('PBIR visuals are classified and titled from current and older locations', 
 });
 
 test('first-N-pages scope skips hidden tooltip pages but keeps order', () => {
-  const pages = [{ id: 'a' }, { id: 'tip', hidden: true }, { id: 'b' }, { id: 'c' }];
+  const v = [{ id: 'x', role: 'data' }];
+  const pages = [{ id: 'a', visuals: v }, { id: 'tip', hidden: true, visuals: v }, { id: 'empty', visuals: [] }, { id: 'b', visuals: v }, { id: 'c', visuals: v }];
   assert.deepEqual(selectPages(pages, 2).map(page => page.id), ['a', 'b']);
-  assert.deepEqual(selectPages([{ id: 'tip', hidden: true }, { id: 'a' }], 2).map(page => page.id), ['tip', 'a']);
-  assert.equal(selectPages(pages, null).length, 4);
+  assert.deepEqual(selectPages([{ id: 'tip', hidden: true, visuals: v }, { id: 'a', visuals: v }], 2).map(page => page.id), ['tip', 'a']);
+  assert.deepEqual(selectPages([{ id: 'empty', visuals: [] }, { id: 'a', visuals: v }], 2).map(page => page.id), ['empty', 'a']);
+  assert.deepEqual(selectPages([{ id: 'a' }, { id: 'b' }], 1).map(page => page.id), ['a']);
+  assert.equal(selectPages(pages, null).length, 5);
 });
 
 test('staged Gemini input excludes caches, cultures, and diagram layouts', () => {
@@ -299,7 +302,7 @@ test('end to end: missing CSV source fails in preflight before Gemini runs', wit
   fs.rmSync(path.join(sandbox.sourceData, 'sales.csv'));
   const result = await runConverter(sandbox);
   assert.equal(result.code, 1);
-  assert.match(result.stdout, /CONVERSION STOPPED at preflight: The selected pages read CSV file\(s\) this PC cannot open/);
+  assert.match(result.stdout, /CONVERSION STOPPED at preflight: The selected pages read file\(s\) this PC cannot open: .*sales\.csv/);
   assert.deepEqual(result.calls, []);
 }));
 

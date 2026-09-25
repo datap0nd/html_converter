@@ -61,7 +61,7 @@ export function pageLimitFromArgs(args) {
 // Hidden tooltip/drillthrough pages only fill in when there are too few visible ones.
 export function selectPages(pages, pageLimit) {
   if (!pageLimit) return pages;
-  const hasContent = page => page.visuals.some(visual => visual.role !== 'group');
+  const hasContent = page => (page.visuals ?? []).some(visual => visual.role !== 'group');
   // Visible pages with visuals first; empty or hidden pages only fill remaining slots.
   const chosen = [];
   for (const candidates of [pages.filter(page => !page.hidden && hasContent(page)), pages.filter(page => !page.hidden && !hasContent(page)), pages.filter(page => page.hidden)]) {
