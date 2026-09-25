@@ -6,36 +6,78 @@ Put one complete PBIP project (`*.pbip` plus its `.Report` and `.SemanticModel` 
 .\setup.ps1
 ```
 
-That one command updates the code from GitHub, preserves your `input/`, `.env`, `output/`, `work/`, and logs, installs the checked-in Node dependencies, then runs the converter. The stable `setup.ps1` launcher does not need routine edits; the downloaded `live-setup.ps1` and the npm `start` command control the current workflow. If the window closes, `logs/latest.txt` names the persistent setup log. Stop a previous server with Ctrl+C before starting another.
+That one command updates the code from GitHub, preserves your `input/`, `.env`, `output/`, `work/`, and logs, installs the checked-in Node dependencies, then runs the converter. The stable `setup.ps1` launcher does not need routine edits; the downloaded `live-setup.ps1` controls the current workflow. Stop a previous server with Ctrl+C before starting another (if you forget, the new server moves to the next free port and prints its address).
 
-The first question asks whether to convert the first two report pages end to end or all report pages end to end. Enter `1` (also the default) for the two-page test, or `2` for the complete report. The test is fully isolated: its output is `output/first-2-pages/dynamic/` and its checkpoints/logs are under `work/scopes/first-2-pages/`. The all-pages run continues to use `output/dynamic/` and `work/live-state.json`, so testing two pages cannot overwrite or reset an existing full-report conversion.
+The first question offers three choices:
 
-In the two-page test, Gemini receives only those two PBIR page folders plus the shared report and semantic-model definitions. Each Gemini call is capped at 10 minutes and each phase at 15 minutes total. The all-pages workflow allows 20 minutes per call and 40 minutes per phase. Timeout handling forcibly releases the runner even if a Windows child process does not close normally.
+- `1` (default): convert the first two report pages end to end. Hidden tooltip/drillthrough pages and empty pages are skipped when choosing them. The test is fully isolated: its output is `output/first-2-pages/dynamic/` and its checkpoints are under `work/scopes/first-2-pages/`, so it cannot overwrite or reset a full-report conversion.
+- `2`: convert all report pages (`output/dynamic/`, `work/live-state.json`).
+- `3`: **self-test this PC**. It runs the real converter with your Node.js and your installed Gemini CLI against a local mock of the Gemini API and a generic test report. It uses no Gemini quota, no sign-in, and none of your report data, and takes about a minute. Run it after updating Node.js or Gemini CLI, or whenever something fails in a way the message below does not explain. `npm run selftest` does the same.
 
-The workflow uses your existing globally installed Gemini CLI and is pinned to `gemini-3.8-flash`; it does not install another Gemini CLI inside the repository. A `GEMINI_MODEL` value left in an existing `.env` is ignored.
+## What you see while it runs
 
-The converter does not run a separate `gemini --version` startup probe. Some Windows/proxy environments make that harmless command hang; the converter launches the required phase directly and reports its real output if it cannot start.
+Every line is printed as it happens and saved to `logs/converter-<date>-<pid>.log` (`logs/latest-converter-log.txt` names the newest). When something fails, send that one file. Each Gemini phase narrates what Gemini is doing, for example:
 
-The converter scans the PBIP, runs Gemini CLI interpretation, build, and independent review phases, and generates `output/dynamic/index.html` plus a source-specific local `output/dynamic/backend.mjs`. If page/visual coverage is incomplete, it asks Gemini to repair the missing visuals in batches of up to eight, then runs a final independent review. It checks source health and calls every visual endpoint before serving the report at `http://127.0.0.1:8765/`. These checks do not prove that the generated source logic is correct. `npm run preflight` checks PBIP structure without Gemini or source access. The old PostgreSQL table browser is available separately as `npm run live-preview`; it is not the report converter. The older static export path remains `npm run convert` but is not the default.
+```
+12:03:13 [01-interpret] Attempt 1 of 4: Gemini gemini-3.8-flash running. Live transcript: work/.../01-interpret.attempt-1.events.jsonl
+12:03:14 [01-interpret] Gemini session started (model gemini-3.8-flash).
+12:03:15 [01-interpret] read_file work/report-digest.json
+12:04:41 [01-interpret] write_file work/live-interpretation.json (18.2 KB)
+12:04:42 [01-interpret] Gemini finished: success, 6 tool call(s), 81k input / 9k output tokens.
+```
 
-Progress is saved in `work/live-state.json`. Re-running the same `setup.ps1` with an unchanged PBIP reuses completed phases and already repaired visuals; it retries the incomplete phase or page batch. The runner can adopt artifacts from a pre-checkpoint run when its saved inventory matches. Changing the PBIP definitions invalidates the checkpoint and starts a new conversion. To deliberately restart from the beginning, run `node scripts/start-live-report.mjs --fresh` from `gemini/`. Source health and visual endpoint checks always run again, since the live data may have changed. Logs for each attempt remain under `work/live-run-*/`; setup logs are named in `logs/latest.txt`.
+Gemini CLI's own API retries (HTTP 429/503, network errors) appear as `Gemini API request failed; Gemini CLI is retrying on its own`. If Gemini is silent for a minute, a `Waiting for Gemini` line says how long and what it did last; silence is normal while it writes a large file. The raw event stream, stderr, and a Gemini debug log for every attempt are kept under `work/.../live-run-*/`.
 
-Gemini `429`, `RESOURCE_EXHAUSTED`, rate-limit, and temporary model-capacity failures are retried up to five times with bounded exponential backoff. Every retry starts from the last saved output rather than retaining a partially edited failed attempt. If the provider remains unavailable, setup stops while preserving the checkpoint, and a later `setup.ps1` run resumes the same unfinished page batch. A terminal color-support warning is cosmetic and does not affect conversion.
+## How a run works
 
-A Gemini phase that exits successfully but forgets to write its required JSON or generated report files is also incomplete, not successful. The runner recovers a strictly valid JSON artifact when Gemini printed it in the structured response; otherwise it retries the same phase with the missing filenames explicitly listed. Nothing is checkpointed until all required phase files exist.
+1. **Scan and digest.** The runner reads the PBIR pages and visuals (data, decorative, or group), the TMDL or `model.bim` semantic model, Power Query sources (including literal M parameters), and writes `work/.../report-digest.json`: the selected pages, visuals, field bindings, filters, and only the model tables, measures, calculation groups, relationships, and Power Query code those visuals use. Gemini starts from this one file instead of opening every definition file.
+2. **Preflight.** Before any Gemini call it checks Node.js, that Gemini CLI is installed, that the semantic model folder is present, that file sources used by the selected pages are readable, that the PostgreSQL login works (and that native SQL was explicitly allowed), and that no selected page needs a connector with no available driver (SQL Server, Oracle, Excel, SharePoint, ...). Each stop explains what to do.
+3. **Gemini phases**, each in a fresh headless Gemini CLI process inside a temporary copy of the definitions (never `.env`, data exports, Desktop caches, or culture files): interpret, build (`output/.../index.html` plus a local `backend.mjs`), and an independent review.
+4. **Self-check.** The runner itself executes the generated backend: syntax, import, source healthcheck, and a query for every data visual. Code errors, a blocked review, or missing visual markup are sent back to Gemini in focused fix or repair phases (bounded, with a final independent review), instead of failing the run.
+5. **Serve** the report on `http://127.0.0.1:8765/` (or the next free port).
 
-The runner intends to keep `.env` credentials in the **local Node backend**, not the HTML; it scans generated HTML for known secrets. AI-generated code still requires security review. Private files and SQL databases require a backend while the report is live. An HTML file opened directly or hosted on GitHub Pages cannot maintain private network/SQL connections. For remote hosting you need an approved, authenticated backend with access to those sources. The generated HTML is a review artifact, not a standalone static snapshot.
+Gemini CLI is launched the way its headless mode is verified to work (checked against Gemini CLI 0.61.0): a single process that the runner can stop cleanly, workspace trust through `GEMINI_CLI_TRUST_WORKSPACE`, only file tools (read, list, search, write, replace; no shell, web, subagents, plan mode, or MCP servers), `NO_BROWSER` so an expired sign-in fails fast instead of waiting for a `[Y/n]` answer, and no terminal-colour warnings. Older CLIs that lack `--output-format stream-json` still work, without live narration.
+
+A phase attempt stops when Gemini produces no output for 8 minutes (10 for all pages) or runs for 20 minutes (35), and a phase has 40 minutes (90) in total. If Gemini already wrote every required file when an attempt is stopped, those files are used. Raise the limits in `.env` with `GEMINI_IDLE_TIMEOUT_MINUTES`, `GEMINI_ATTEMPT_TIMEOUT_MINUTES`, and `GEMINI_PHASE_BUDGET_MINUTES` if your reports are very large.
+
+Progress is saved in `work/.../live-state.json`. Re-running `setup.ps1` with an unchanged PBIP and page selection reuses completed phases and repaired visuals, rechecks the saved backend before spending another Gemini phase, and retries only what is unfinished. Changing the PBIP definitions, the selected pages, or updating to a converter with a new checkpoint format starts that scope fresh. To restart deliberately, run `node scripts/start-live-report.mjs --fresh` (add `--page-limit 2` for the test scope). `npm run preflight` runs the scan and preflight checks without Gemini.
+
+## When it stops
+
+The last lines always say `CONVERSION STOPPED at <step>: <reason>`, then `What to do:`, then the log file. The common cases:
+
+| Message | What to do |
+|---|---|
+| Gemini CLI is waiting for an interactive answer / could not authenticate (exit 41) | Open PowerShell, run `gemini`, finish the Google sign-in (or set `GEMINI_API_KEY`), type `/quit`, rerun setup. Completed phases are kept. |
+| Gemini CLI was not found | `npm install -g @google/gemini-cli`, open a new PowerShell window, run `gemini` once to sign in. |
+| A Gemini CLI settings file is invalid (exit 52) | Fix `%USERPROFILE%\.gemini\settings.json`; save it as UTF-8 **without** BOM (Windows PowerShell 5.1 `Set-Content -Encoding UTF8` adds one). |
+| Gemini CLI does not trust the corporate proxy certificate | In the same PowerShell window: `$env:NODE_EXTRA_CA_CERTS = "C:\path\to\corporate-root-ca.pem"` (ask IT), then rerun. Behind a proxy also set `$env:HTTPS_PROXY`. |
+| The pinned model is not available | `npm install -g @google/gemini-cli@latest`; check the account can use `gemini-3.8-flash`. |
+| Gemini stopped making progress | Rerun; it resumes at that phase. Raise the timeouts in `.env` if it repeats. |
+| Cannot connect to PostgreSQL ... | The hint names the cause: wrong `PG_USER`/`PG_PASSWORD`, VPN/firewall, unknown host, TLS (`PG_SSL_CA_FILE` or, only if your DBA approves, `PG_SSL_MODE=disable`). |
+| The report runs its own SQL (Value.NativeQuery) | Review the SQL in `work/inventory.json`, then set `PG_ALLOW_NATIVE_QUERIES=true`. |
+| The selected pages read file(s) this PC cannot open | Connect to VPN / the share; check the path (or the M parameter holding its folder). |
+| ... connector(s) this converter has no driver for | Choose pages that use PostgreSQL or files, or set `HC_ALLOW_UNSUPPORTED_CONNECTORS=true` to build anyway with labeled placeholders. |
+| The report points to a semantic model folder that is not in gemini/input | Copy the `.pbip` file with both the `.Report` and `.SemanticModel` folders. |
+| No enhanced PBIR pages/visuals found | In Power BI Desktop enable the PBIR preview feature (File > Options > Preview features), save as `.pbip` again. |
+| The independent Gemini review still blocks the report | Read the named review file. Rerun for another fix round, or set `HC_ALLOW_BLOCKED_REVIEW=true` to open it anyway for manual comparison. |
 
 ## What Gemini can and cannot guarantee
 
-Gemini reads the report definitions in a temporary workspace that excludes `.env` and data exports, then generates replacement code for the connectors, Power Query transformations, DAX-like calculations, relationships, filters, and visuals it can reconstruct. It must flag unsupported parts and cannot fabricate data. The runner refuses a review marked `blocked`, missing pages/visuals, broken source connections, or nonworking visual endpoints. Results and limitations are written to `work/live-interpretation.json`, `work/live-build.json`, `work/live-review.json`, `work/live-preflight.json`, and `work/live-validation.json`.
+Gemini generates replacement code for the connectors, Power Query transformations, DAX-like calculations, relationships, filters, and visuals it can reconstruct. It must flag unsupported parts and cannot fabricate data. Visuals it cannot reconstruct are served as explicit, labeled placeholders and listed at the end of the run. Results and limitations are written to `work/.../live-interpretation.json`, `live-build.json`, `live-review.json` (and `live-final-review.json` after repairs), `live-selfcheck.json`, `live-preflight.json`, and `live-validation.json`.
 
-This is **not a universal exact Power BI clone**. The phased runner and checkpoints apply generically to enhanced PBIR reports, but connector support, calculations, custom visuals, and fidelity still depend on each report. A PBIP contains report/model definitions but not necessarily imported rows, connector credentials, a Power Query/DAX execution engine, proprietary custom visual code, or every service feature. Reports with unsupported connectors or missing credentials stop with an explicit limitation; the runner cannot solve those automatically. Gemini CLI runs locally but the selected Gemini model is a cloud service: report definitions passed to it may leave your PC. Check your organization's data-use policy before running it with confidential PBIP files. Do not put credentials in PBIP files, prompts, HTML, or this public repository.
+This is **not a universal exact Power BI clone**. A PBIP contains report/model definitions but not necessarily imported rows, connector credentials, a Power Query/DAX execution engine, proprietary custom visual code, or every service feature. Gemini CLI runs locally but the selected Gemini model is a cloud service: report definitions passed to it may leave your PC. Check your organization's data-use policy before running it with confidential PBIP files. Do not put credentials in PBIP files, prompts, HTML, or this public repository.
 
-The generated backend is AI-written code. The independent review and automated checks reduce errors but cannot prove security or parity with Power BI. Compare representative totals, slicer behavior, page layouts, and visual results in Power BI before relying on or distributing the HTML. If a connector needs a driver or credential that is unavailable, the run stops and reports that need; it does not silently switch to a different source.
+The generated backend is AI-written code. The independent review and automated checks reduce errors but cannot prove security or parity with Power BI. Compare representative totals, slicer behavior, page layouts, and visual results in Power BI before relying on or distributing the HTML. The HTML is a review artifact served by the local backend, not a standalone static snapshot; private files and SQL databases need that backend while the report is live.
 
 ## Credentials and source access
 
-The first run creates private `gemini/.env` from `.env.example`. Network files normally use the Windows identity running the converter. SQL sources need their own read-only credentials and drivers. The current checked-in driver is `pg` for PostgreSQL; other SQL connectors may require an approved driver to be added to the repo. `PG_USER`, `PG_PASSWORD`, and the other PostgreSQL settings in `.env.example` apply only when the PBIP actually uses PostgreSQL. A different connector should never be mapped to PostgreSQL as a shortcut.
+The first run creates private `gemini/.env` from `.env.example`. Network files normally use the Windows identity running the converter. The checked-in SQL driver is `pg` for PostgreSQL; `PG_*` settings apply only when the PBIP actually uses PostgreSQL. A different connector is never mapped to PostgreSQL as a shortcut. Gemini never receives `.env`; the runner passes its values only to the generated backend, keeps them out of every log line, and scans the HTML for them.
 
 `input/`, `output/`, `work/`, `logs/`, and `.env` are Git-ignored. Do not force-add them to this public repository. The server listens only on `127.0.0.1` and must be stopped with Ctrl+C when finished.
+
+## Tests
+
+`npm test` runs the unit, fixture, and end-to-end tests. `tests/fixtures/` holds generic PBIP projects modelled on what Power BI Desktop saves (CSV, PostgreSQL with native SQL, edge cases, a legacy report, a thin report) with expected results. End-to-end tests drive the real entry point with a fake Gemini CLI that injects stalls, sign-in prompts, rate limits, broken backends, missing visuals, and blocked reviews. Optional: set `HC_TEST_GEMINI_BUNDLE` to an installed `@google/gemini-cli/bundle/gemini.js` to run the real CLI offline against the mock API, and `HC_TEST_PG=host:port:user:password` for a PostgreSQL seeded with `tests/fixtures/data/salespostgres-seed.sql`.
+
+The older PostgreSQL table browser remains `npm run live-preview` and the static export path `npm run convert`; neither is the default.
