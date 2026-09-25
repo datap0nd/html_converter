@@ -180,10 +180,11 @@ function createGeminiWorkspace(inventory, scope) {
   // subagents, and the user's MCP servers. Unknown keys are ignored by older CLI versions.
   fs.mkdirSync(path.join(stage, '.gemini'), { recursive: true });
   fs.writeFileSync(path.join(stage, '.gemini', 'settings.json'), JSON.stringify(STAGE_SETTINGS, null, 2) + '\n');
-  for (const canonical of ['work/live-interpretation.json', 'work/live-build.json', 'work/live-review.json', 'work/live-final-review.json', 'output/dynamic/index.html', 'output/dynamic/backend.mjs']) {
+  for (const canonical of ['work/live-interpretation.json', 'work/live-build.json', 'work/live-review.json', 'work/live-final-review.json']) {
     const source = persistedPath(scope, canonical);
     if (fs.existsSync(source)) fs.copyFileSync(source, path.join(stage, canonical));
   }
+  replaceFolder(scope.dynamicDir, path.join(stage, 'output', 'dynamic'));
   return stage;
 }
 
@@ -225,6 +226,13 @@ function collectClientErrorReports(since, runDir, label) {
       log.info('gemini', `Gemini API error report saved: ${rel(target)}`);
     } catch { /* another process may own it */ }
   }
+}
+
+// The generated report is a folder: index.html, backend.mjs, and any helper files Gemini adds.
+function replaceFolder(source, target) {
+  fs.mkdirSync(target, { recursive: true });
+  for (const entry of fs.readdirSync(target)) if (entry !== '.gitkeep') fs.rmSync(path.join(target, entry), { recursive: true, force: true });
+  if (fs.existsSync(source)) for (const entry of fs.readdirSync(source)) fs.cpSync(path.join(source, entry), path.join(target, entry), { recursive: true });
 }
 
 function preserveStage(stage, runDir, name) {
@@ -470,7 +478,7 @@ async function runPhase([name, promptFile, expectedFile], ctx) {
       // A fresh build starts empty; a retry keeps what the previous attempt already wrote.
       if (attempt === 1) for (const file of fs.readdirSync(path.join(stage, 'output', 'dynamic'))) fs.rmSync(path.join(stage, 'output', 'dynamic', file), { recursive: true, force: true });
     } else if (outputsEdited(name)) {
-      for (const file of ['index.html', 'backend.mjs']) fs.copyFileSync(path.join(scope.dynamicDir, file), path.join(stage, 'output', 'dynamic', file));
+      replaceFolder(scope.dynamicDir, path.join(stage, 'output', 'dynamic'));
     }
     // Quoted back to Gemini; characters cmd.exe treats specially are removed for the shim launcher.
     const lastProblem = result?.events?.filter(event => event.type === 'error' || (event.type === 'tool_result' && event.summary)).map(event => event.summary).at(-1)?.replace(/["%!&|<>()^\r\n]/g, ' ');
@@ -560,7 +568,7 @@ async function runPhase([name, promptFile, expectedFile], ctx) {
   const persistedExpected = persistedPath(scope, expectedFile);
   fs.mkdirSync(path.dirname(persistedExpected), { recursive: true });
   fs.copyFileSync(expected, persistedExpected);
-  if (outputsEdited(name)) for (const file of ['index.html', 'backend.mjs']) fs.copyFileSync(path.join(stage, 'output', 'dynamic', file), path.join(scope.dynamicDir, file));
+  if (outputsEdited(name)) replaceFolder(path.join(stage, 'output', 'dynamic'), scope.dynamicDir);
   log.info(name, `Complete in ${formatDuration(Date.now() - phaseStarted)}; wrote ${expectedFile} (${formatBytes(fs.statSync(expected).size)}).`);
 }
 
@@ -957,7 +965,7 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
         // On resume, prove the saved backend works before spending a review phase on it.
         if (name === '03-review' && !lastCheck) await ensureBackend('saved build');
         if (name === '02-build') {
-          for (const [file, backup] of [[htmlFile, 'previous-index.html'], [backendFile, 'previous-backend.mjs']]) if (fs.existsSync(file)) fs.copyFileSync(file, path.join(runDir, backup));
+          if (fs.existsSync(backendFile) || fs.existsSync(htmlFile)) replaceFolder(scope.dynamicDir, path.join(runDir, 'previous-output'));
           state.repairs = {};
           state.needsFinalReview = false;
           state.placeholderFixDone = false;
