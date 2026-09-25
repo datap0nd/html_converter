@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { createSandbox, geminiDir } from './support/fixtures.mjs';
+import { createSandbox, geminiDir } from '../selftest/sandbox.mjs';
 
 const [host, port, user, password] = (process.env.HC_TEST_PG ?? '').split(':');
 const skip = !process.env.HC_TEST_PG && 'set HC_TEST_PG=host:port:user:password to run against a real PostgreSQL';
@@ -13,7 +13,7 @@ const base = { PG_HOST: host, PG_PORT: port, PG_USER: user, PG_PASSWORD: passwor
 function convert(env) {
   const sandbox = createSandbox({ fixture: 'SalesPostgres', env });
   try {
-    const result = spawnSync(process.execPath, [path.join(sandbox.dir, 'scripts', 'start-live-report.mjs'), '--page-limit', '2', '--no-serve'], { cwd: sandbox.dir, encoding: 'utf8', env: { ...process.env, HC_GEMINI_ENTRY: path.join(geminiDir, 'tests', 'support', 'fake-gemini-cli.mjs'), FAKE_GEMINI_STATE: path.join(sandbox.dir, 'state.json') } });
+    const result = spawnSync(process.execPath, [path.join(sandbox.dir, 'scripts', 'start-live-report.mjs'), '--page-limit', '2', '--no-serve'], { cwd: sandbox.dir, encoding: 'utf8', env: { ...process.env, HC_GEMINI_ENTRY: path.join(geminiDir, 'selftest', 'fake-gemini-cli.mjs'), FAKE_GEMINI_STATE: path.join(sandbox.dir, 'state.json') } });
     return { code: result.status, stdout: result.stdout, stderr: result.stderr };
   } finally { sandbox.cleanup(); }
 }

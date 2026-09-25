@@ -1,0 +1,1 @@
+Generic PBIP report used by the self-test (no real data). `selftest/sandbox.mjs` copies it into a temporary converter folder's `input/` and replaces `{{DATA_DIR}}` with the absolute path of `data/`. IDs are short on purpose: setup extracts updates under a temporary folder and Windows PowerShell 5.1 cannot handle paths over 260 characters.

@@ -23,8 +23,8 @@ const keep = args.includes('--keep');
 const say = message => process.stdout.write(`[selftest] ${message}\n`);
 
 async function main() {
-  const { createSandbox } = await import('../tests/support/fixtures.mjs');
-  const cli = useFake ? { found: true, entry: path.join(root, 'tests', 'support', 'fake-gemini-cli.mjs'), version: 'fake', source: 'built-in fake' } : geminiCliInfo();
+  const { createSandbox } = await import('../selftest/sandbox.mjs');
+  const cli = useFake ? { found: true, entry: path.join(root, 'selftest', 'fake-gemini-cli.mjs'), version: 'fake', source: 'built-in fake' } : geminiCliInfo();
   if (!cli.found) throw new Error('Gemini CLI was not found. Install it with: npm install -g @google/gemini-cli   (or run with --fake-cli to test everything else).');
   if (!useFake && !cli.prefix) throw new Error(`Gemini CLI was found only as a command shim (${cli.entry}); the self-test needs the npm package entry. Reinstall with: npm install -g @google/gemini-cli`);
   say(`Node ${process.version}; Gemini CLI ${cli.version ?? '(unknown version)'} at ${cli.entry}`);
@@ -38,7 +38,7 @@ async function main() {
   try {
     const env = { ...process.env, HC_GEMINI_ENTRY: cli.entry, HC_NO_SERVE: 'true', FAKE_GEMINI_SCENARIO: scenario, FAKE_GEMINI_STATE: path.join(sandbox.dir, 'fake-state.json'), GEMINI_CLI_HOME: home, GEMINI_API_KEY: 'selftest-not-a-real-key' };
     if (!useFake) {
-      mock = spawn(process.execPath, [path.join(root, 'tests', 'support', 'mock-gemini-api.mjs'), '--script', path.join(root, 'tests', 'support', 'converter-model-handler.mjs'), '--port', '0', '--quiet', '--log', path.join(sandbox.dir, 'mock-requests.jsonl')], { stdio: ['ignore', 'pipe', 'inherit'], env: { ...process.env, FAKE_GEMINI_SCENARIO: scenario } });
+      mock = spawn(process.execPath, [path.join(root, 'selftest', 'mock-gemini-api.mjs'), '--script', path.join(root, 'selftest', 'converter-model-handler.mjs'), '--port', '0', '--quiet', '--log', path.join(sandbox.dir, 'mock-requests.jsonl')], { stdio: ['ignore', 'pipe', 'inherit'], env: { ...process.env, FAKE_GEMINI_SCENARIO: scenario } });
       const url = await new Promise((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error('Mock Gemini API did not start.')), 15000);
         readline.createInterface({ input: mock.stdout }).once('line', line => { clearTimeout(timer); resolve(JSON.parse(line).url); });

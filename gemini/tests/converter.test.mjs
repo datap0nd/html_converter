@@ -4,14 +4,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
-import { createSandbox, geminiDir, fixturesDir } from './support/fixtures.mjs';
+import { createSandbox, geminiDir, fixturesDir, demoDir } from '../selftest/sandbox.mjs';
 import { parseTmdl, loadSemanticModel, scopeModel, daxReferences, mReferences, parseQualifiedColumn } from '../scripts/digest.mjs';
 import { classifyVisual, visualTitle, describeField } from '../scripts/pbir.mjs';
 import { runGeminiStream, unsupportedFlag, toolTarget, shimTarget } from '../scripts/gemini.mjs';
 import { selectPages, classifyBackendIssue, diagnoseGeminiFailure, normalizeReviewStatus, validateLiveReport, stagedInputAllowed, scopedConnectors, responseTextArtifact, phaseSettings } from '../scripts/start-live-report.mjs';
 import { consoleSafe, redact, addSecret } from '../scripts/log.mjs';
 
-const fakeCli = path.join(geminiDir, 'tests', 'support', 'fake-gemini-cli.mjs');
+const fakeCli = path.join(geminiDir, 'selftest', 'fake-gemini-cli.mjs');
 
 function runConverter(sandbox, { scenario = '', args = ['--page-limit', '2', '--no-serve'], env = {}, onLine } = {}) {
   return new Promise(resolve => {
@@ -41,7 +41,7 @@ function withSandbox(fn) {
 // ---------- PBIR / TMDL digest ----------
 
 test('TMDL parser reads multi-line measures, fenced and calculated partitions, and quoted names', () => {
-  const nodes = parseTmdl(fs.readFileSync(path.join(fixturesDir, 'SalesCsv/SalesCsv.SemanticModel/definition/tables/Sales.tmdl'), 'utf8'));
+  const nodes = parseTmdl(fs.readFileSync(path.join(demoDir, 'Demo.SemanticModel/definition/tables/Sales.tmdl'), 'utf8'));
   const table = nodes[0];
   assert.equal(table.kind, 'table');
   assert.equal(table.name, 'Sales');
@@ -60,12 +60,12 @@ test('TMDL parser reads multi-line measures, fenced and calculated partitions, a
 });
 
 test('model scoping follows DAX and M references and drops unused measures', () => {
-  const files = fs.readdirSync(path.join(fixturesDir, 'SalesCsv/SalesCsv.SemanticModel/definition'), { recursive: true }).map(file => path.join(fixturesDir, 'SalesCsv/SalesCsv.SemanticModel/definition', file)).filter(file => fs.statSync(file).isFile());
-  const model = loadSemanticModel(files, fixturesDir);
+  const files = fs.readdirSync(path.join(demoDir, 'Demo.SemanticModel/definition'), { recursive: true }).map(file => path.join(demoDir, 'Demo.SemanticModel/definition', file)).filter(file => fs.statSync(file).isFile());
+  const model = loadSemanticModel(files, demoDir);
   assert.equal(model.format, 'tmdl');
   assert.deepEqual(model.tables.map(table => table.name).sort(), ['Date', 'Product', 'Sales']);
   assert.equal(model.relationships.length, 2);
-  assert.deepEqual(model.relationships[1], { name: '1e6d8f22-cccc-4c4d-8e9f-2a3b4c5d6e7f', source: 'SalesCsv/SalesCsv.SemanticModel/definition/relationships.tmdl', fromTable: 'Sales', fromColumn: 'OrderDate', toTable: 'Date', toColumn: 'Date', crossFilteringBehavior: 'oneDirection', active: true });
+  assert.deepEqual(model.relationships[1], { name: '1e6d8f22-cccc-4c4d-8e9f-2a3b4c5d6e7f', source: 'Demo.SemanticModel/definition/relationships.tmdl', fromTable: 'Sales', fromColumn: 'OrderDate', toTable: 'Date', toColumn: 'Date', crossFilteringBehavior: 'oneDirection', active: true });
   const scoped = scopeModel(model, [{ kind: 'measure', table: 'Sales', name: 'Sales YoY %' }]);
   const sales = scoped.tables.find(table => table.name === 'Sales');
   assert.deepEqual(sales.measures.map(measure => measure.name).sort(), ['Sales YoY %', 'Total Sales']);
@@ -76,11 +76,11 @@ test('model scoping follows DAX and M references and drops unused measures', () 
 });
 
 test('PBIR visuals are classified and titled from current and older locations', () => {
-  const read = (page, visual) => JSON.parse(fs.readFileSync(path.join(fixturesDir, `SalesCsv/SalesCsv.Report/definition/pages/${page}/visuals/${visual}/visual.json`), 'utf8'));
-  assert.equal(classifyVisual(read('a1b2c3d4e5f6a7b8c9d0', 'c0ffee00000000000002')), 'data');
-  assert.equal(classifyVisual(read('a1b2c3d4e5f6a7b8c9d0', 'c0ffee00000000000004')), 'decorative');
-  assert.equal(classifyVisual(read('a1b2c3d4e5f6a7b8c9d0', 'c0ffee000000000group1')), 'group');
-  assert.equal(visualTitle(read('a1b2c3d4e5f6a7b8c9d0', 'c0ffee00000000000002')), 'Sales by category');
+  const read = (page, visual) => JSON.parse(fs.readFileSync(path.join(demoDir, `Demo.Report/definition/pages/${page}/visuals/${visual}/visual.json`), 'utf8'));
+  assert.equal(classifyVisual(read('p1', 'v2')), 'data');
+  assert.equal(classifyVisual(read('p1', 'v4')), 'decorative');
+  assert.equal(classifyVisual(read('p1', 'g1')), 'group');
+  assert.equal(visualTitle(read('p1', 'v2')), 'Sales by category');
   assert.equal(visualTitle({ visual: { objects: { title: [{ properties: { text: { expr: { Literal: { Value: "'It''s old'" } } } } }] } } }), "It's old");
   assert.deepEqual(describeField({ Aggregation: { Expression: { Column: { Expression: { SourceRef: { Entity: 'Sales' } }, Property: 'Amount' } }, Function: 0 } }), { kind: 'aggregation', table: 'Sales', name: 'Amount', of: 'column', aggregation: 'Sum' });
 });
@@ -230,9 +230,9 @@ test('end to end: two-page conversion serves the report and answers visual queri
       checked = (async () => {
         const page = await fetch(match[1]);
         const html = await page.text();
-        const api = await fetch(`${match[1]}api/report?visual=c0ffee00000000000002&filters=%7B%7D`);
+        const api = await fetch(`${match[1]}api/report?visual=v2&filters=%7B%7D`);
         const unknown = await fetch(`${match[1]}api/report?visual=nope`);
-        const foreign = await fetch(`${match[1]}api/report?visual=c0ffee00000000000002`, { headers: { Origin: 'http://evil.example' } });
+        const foreign = await fetch(`${match[1]}api/report?visual=v2`, { headers: { Origin: 'http://evil.example' } });
         child.kill();
         return { html, api: { status: api.status, body: await api.json() }, unknown: unknown.status, foreign: foreign.status };
       })();
@@ -240,7 +240,7 @@ test('end to end: two-page conversion serves the report and answers visual queri
   });
   const served = await checked;
   assert.ok(served, `server never became ready:\n${result.stdout}`);
-  assert.match(served.html, /data-page-id="a1b2c3d4e5f6a7b8c9d0"/);
+  assert.match(served.html, /data-page-id="p1"/);
   assert.equal(served.api.status, 200);
   assert.ok(served.api.body.rows.length > 0);
   assert.equal(served.unknown, 400);

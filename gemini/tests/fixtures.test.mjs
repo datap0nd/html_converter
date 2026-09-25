@@ -7,12 +7,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { createSandbox, fixturesDir, geminiDir } from './support/fixtures.mjs';
+import { createSandbox, fixturesDir, geminiDir } from '../selftest/sandbox.mjs';
 import { parseTmdl } from '../scripts/tmdl.mjs';
 import { resolveMText, callArguments, stripMComments, mUnescape, readCsvFile, scanModelSources } from '../scripts/core.mjs';
 
 const expected = name => JSON.parse(fs.readFileSync(path.join(fixturesDir, '_expected', `${name}.json`), 'utf8'));
-const fakeCli = path.join(geminiDir, 'tests', 'support', 'fake-gemini-cli.mjs');
+const fakeCli = path.join(geminiDir, 'selftest', 'fake-gemini-cli.mjs');
 
 async function inSandbox(fixture, fn, env) {
   const sandbox = createSandbox({ fixture, env });
