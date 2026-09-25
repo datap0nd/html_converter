@@ -1,0 +1,34 @@
+table Product
+	lineageTag: 4a2b8c63-1e8f-4c9b-ae72-6f3a8b9c0d12
+
+	column ProductKey
+		dataType: int64
+		formatString: 0
+		lineageTag: f6b694ca-08dd-45ee-17a2-b3c4d5e6f709
+		summarizeBy: none
+		sourceColumn: ProductKey
+
+	column Product
+		dataType: string
+		lineageTag: 07c7a5db-19ee-46ff-28b3-c4d5e6f7081a
+		summarizeBy: none
+		sourceColumn: Product
+
+	column Category
+		dataType: string
+		lineageTag: 18d8b6ec-2aff-4700-39c4-d5e6f708192b
+		summarizeBy: none
+		sourceColumn: Category
+
+	partition Product = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents("{{DATA_DIR}}products.csv"),[Delimiter=",", Columns=3, Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers",{{"ProductKey", Int64.Type}, {"Product", type text}, {"Category", type text}})
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

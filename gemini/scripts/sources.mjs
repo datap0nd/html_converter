@@ -107,6 +107,41 @@ function connectionConfig(source, env) {
   };
 }
 
+// Actionable advice for the PostgreSQL failures seen on corporate networks.
+export function postgresHint(error) {
+  const text = `${error?.code ?? ''} ${error?.message ?? error ?? ''}`;
+  if (/PG_USER|PG_PASSWORD/.test(text)) return 'Fill PG_USER and PG_PASSWORD in gemini/.env with a read-only login.';
+  if (/28P01|password authentication failed/i.test(text)) return 'The database rejected PG_USER/PG_PASSWORD. Check them in gemini/.env (no quotes needed).';
+  if (/self[- ]signed|unable to (?:get|verify) (?:local )?issuer|UNABLE_TO_VERIFY_LEAF_SIGNATURE|SELF_SIGNED_CERT|CERT_|certificate/i.test(text)) return 'TLS certificate not trusted. Set PG_SSL_CA_FILE in gemini/.env to your organization root CA (.pem/.crt). Use PG_SSL_MODE=disable only if your DBA approves unencrypted connections.';
+  if (/does not support SSL|server does not support SSL/i.test(text)) return 'The server does not accept TLS. Set PG_SSL_MODE=disable in gemini/.env only if your DBA approves this.';
+  if (/no pg_hba\.conf entry/i.test(text)) return 'The server refused this PC/user (pg_hba.conf). Ask the DBA to allow your login, or check PG_SSL_MODE.';
+  if (/ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(text)) return 'The database host name could not be resolved. Connect to VPN, or set PG_HOST in gemini/.env.';
+  if (/ECONNREFUSED/i.test(text)) return 'Nothing is listening at that host/port. Check PG_HOST/PG_PORT (or the PBIP server name) and VPN.';
+  if (/ETIMEDOUT|timeout|ENETUNREACH|EHOSTUNREACH|Connection terminated/i.test(text)) return 'The database did not answer in time. Connect to VPN or check firewall access to the PostgreSQL port.';
+  if (/3D000|database .* does not exist/i.test(text)) return 'That database name does not exist. Check PG_DATABASE in gemini/.env or the PBIP source.';
+  if (/42501|permission denied/i.test(text)) return 'The login lacks read permission on a required table. Ask the DBA for SELECT access.';
+  if (/driver missing|Cannot find (?:package|module) 'pg'/i.test(text)) return 'Run npm install in the gemini folder (setup.ps1 normally does this).';
+  return 'Check gemini/.env PostgreSQL settings, VPN, and firewall access.';
+}
+
+export async function testPostgresConnection(source, env = {}, options = {}) {
+  let Client = options.Client;
+  if (!Client) {
+    try { Client = (await import('pg')).default.Client; }
+    catch { throw new Error('PostgreSQL driver missing. Run npm install in gemini/.'); }
+  }
+  const config = connectionConfig(source, env);
+  const client = new Client({ ...config, connectionTimeoutMillis: options.timeoutMs ?? 15000, query_timeout: options.timeoutMs ?? 15000 });
+  const started = Date.now();
+  try {
+    await client.connect();
+    await client.query('BEGIN READ ONLY');
+    await client.query('SELECT 1');
+    await client.query('COMMIT');
+    return { host: config.host, port: config.port, database: config.database, user: config.user, ms: Date.now() - started };
+  } finally { try { await client.end(); } catch { /* already closed */ } }
+}
+
 export function listLiveSources(inventory, env = {}) {
   if (inventory.unsupportedConnectors?.length) {
     throw new Error(`Unsupported connector(s): ${[...new Set(inventory.unsupportedConnectors.map(x => x.connector))].join(', ')}. A live run cannot silently omit them.`);

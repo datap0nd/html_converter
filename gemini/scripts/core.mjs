@@ -1,7 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { visualTitle, classifyVisual, visualType, pageIsHidden } from './pbir.mjs';
 
-export const root = path.resolve(import.meta.dirname, '..');
+// import.meta.dirname needs Node 20.11+; fileURLToPath works on every Node 20.
+export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const inputDir = path.join(root, 'input');
 export const workDir = path.join(root, 'work');
 export const dynamicDir = path.join(root, 'output', 'dynamic');
@@ -24,7 +27,8 @@ export function relative(file) {
 }
 
 export function readJson(file) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+  // Some Windows tools save UTF-8 with a byte-order mark, which JSON.parse rejects.
+  try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); }
   catch { return null; }
 }
 
@@ -213,16 +217,19 @@ export function discover() {
     const j = readJson(f) ?? {};
     const folder = path.dirname(f);
     const visuals = walk(path.join(folder, 'visuals')).filter(v => /[\\/]visual\.json$/i.test(v)).map(v => {
-      const x = readJson(v) ?? {};
+      const x = readJson(v);
       return {
         id: path.basename(path.dirname(v)),
         source: relative(v),
-        type: x.visual?.visualType ?? x.visualType ?? 'unknown',
-        title: x.visual?.objects?.title?.[0]?.properties?.text?.expr?.Literal?.Value ?? null,
-        position: x.position ?? null
+        type: x ? visualType(x) : 'unreadable',
+        title: x ? visualTitle(x) : null,
+        position: x?.position ?? null,
+        // Unreadable JSON is treated as data-bound so it is never silently skipped.
+        role: x ? classifyVisual(x) : 'data',
+        ...(x?.isHidden ? { hidden: true } : {})
       };
     });
-    return { id: path.basename(folder), name: j.displayName ?? j.name ?? path.basename(folder), source: relative(f), visuals };
+    return { id: path.basename(folder), name: j.displayName ?? j.name ?? path.basename(folder), source: relative(f), ...(pageIsHidden(j) ? { hidden: true } : {}), visuals };
   });
   const orderFile = files.find(f => /[\\/]definition[\\/]pages[\\/]pages\.json$/i.test(f));
   const pageOrder = orderFile ? readJson(orderFile)?.pageOrder : null;

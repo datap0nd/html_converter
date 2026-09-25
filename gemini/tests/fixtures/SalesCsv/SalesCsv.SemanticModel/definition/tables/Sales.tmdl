@@ -1,0 +1,74 @@
+table Sales
+	lineageTag: 3f1c9a52-0d7e-4b8a-9d61-5e2f7a8b9c01
+
+	/// Sum of order amounts
+	measure 'Total Sales' = SUM(Sales[Amount])
+		formatString: #,0.00
+		lineageTag: 6a2d0b31-7f44-4c55-8e19-2a3b4c5d6e70
+
+	measure 'Order Count' = COUNTROWS(Sales)
+		formatString: 0
+		lineageTag: 7b3e1c42-8055-4d66-9f2a-3b4c5d6e7f81
+
+	measure 'Sales YoY %' =
+			VAR CurrentSales = [Total Sales]
+			VAR PriorSales = CALCULATE([Total Sales], SAMEPERIODLASTYEAR('Date'[Date]))
+			RETURN DIVIDE(CurrentSales - PriorSales, PriorSales)
+		formatString: 0.0%
+		lineageTag: 8c4f2d53-9166-4e77-a03b-4c5d6e7f8092
+
+	measure 'Unused Measure' = 42
+		lineageTag: 9d503e64-a277-4f88-b14c-5d6e7f8091a3
+
+	column OrderDate
+		dataType: dateTime
+		formatString: Short Date
+		lineageTag: a1614f75-b388-4099-c25d-6e7f8091a2b4
+		summarizeBy: none
+		sourceColumn: OrderDate
+
+		variation Variation
+			isDefault
+			relationship: 0d5c7e11-aaaa-4b3c-9d8e-1f2a3b4c5d6e
+			defaultHierarchy: LocalDateTable_1.'Date Hierarchy'
+
+		annotation SummarizationSetBy = Automatic
+
+	column ProductKey
+		dataType: int64
+		formatString: 0
+		lineageTag: b2725086-c499-41aa-d36e-7f8091a2b3c5
+		summarizeBy: none
+		sourceColumn: ProductKey
+
+	column Region
+		dataType: string
+		lineageTag: c3836197-d5aa-42bb-e47f-8091a2b3c4d6
+		summarizeBy: none
+		sourceColumn: Region
+
+	column Amount
+		dataType: decimal
+		formatString: #,0.00
+		lineageTag: d49472a8-e6bb-43cc-f580-91a2b3c4d5e7
+		summarizeBy: sum
+		sourceColumn: Amount
+
+	column 'Amount Band' = IF(Sales[Amount] >= 500, "Large", "Small")
+		dataType: string
+		lineageTag: e5a583b9-f7cc-44dd-0691-a2b3c4d5e6f8
+		summarizeBy: none
+
+	partition Sales = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents("{{DATA_DIR}}sales.csv"),[Delimiter=",", Columns=4, Encoding=65001, QuoteStyle=QuoteStyle.None]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers",{{"OrderDate", type date}, {"ProductKey", Int64.Type}, {"Region", type text}, {"Amount", type number}}),
+				    #"Filtered Rows" = Table.SelectRows(#"Changed Type", each [Amount] <> null)
+				in
+				    #"Filtered Rows"
+
+	annotation PBI_ResultType = Table
+
