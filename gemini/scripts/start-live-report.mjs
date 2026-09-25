@@ -558,6 +558,12 @@ export async function selfCheckBackend(backendFile, inventory, env, { timeoutMs 
   return { ok: issues.length === 0, issues, placeholders, visuals, backend, health };
 }
 
+// Generated backends may hold database pools; release one that is being replaced.
+async function closeBackend(backend) {
+  if (typeof backend?.close !== 'function') return;
+  try { await withTimeout(backend.close(), 10_000, 'backend.close()'); } catch { /* best effort */ }
+}
+
 // ---------- serving ----------
 
 function listen(server, port) {
@@ -793,11 +799,12 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
     let lastCheck = null;
     const backendHash = () => fs.existsSync(backendFile) ? createHash('sha256').update(fs.readFileSync(backendFile)).digest('hex') : null;
     const ensureBackend = async reason => {
-      if (lastCheck?.ok && lastCheck.hash === backendHash() && !lastCheck.placeholders.length) return lastCheck;
+      if (lastCheck?.ok && lastCheck.hash === backendHash() && (!lastCheck.placeholders.length || state.placeholderFixDone)) return lastCheck;
       for (let round = 0; ; round++) {
         log.info('self-check', `Checking the generated backend (${reason}): syntax, import, source healthcheck, and every data visual query...`);
         const check = await selfCheckBackend(backendFile, inventory, env);
         check.hash = backendHash();
+        await closeBackend(lastCheck?.backend);
         lastCheck = check;
         writeJson(path.join(scope.workDir, 'live-selfcheck.json'), { checkedAt: new Date().toISOString(), reason, ok: check.ok, issues: check.issues, placeholders: check.placeholders, visuals: check.visuals });
         const environment = check.issues.filter(issue => issue.kind === 'environment');
@@ -807,14 +814,17 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
         if (environment.length && !code.length) {
           throw new ConversionError(`The generated backend cannot reach the report's data: ${environment.map(issue => issue.message.split('\n')[0]).slice(0, 3).join(' | ')}`, { phase: 'self-check', hint: `${postgresHint(environment[0].message)} Gemini's work is saved; after fixing this, rerun .\\setup.ps1 and it resumes at this check.` });
         }
-        const needsFix = code.length || (check.placeholders.length && round === 0);
+        // Placeholders get one fix round per build; afterwards they are served, labeled, and listed.
+        const needsFix = code.length || (check.placeholders.length && !state.placeholderFixDone);
         if (!needsFix) return check;
         if (round >= MAX_FIX_ROUNDS) {
           if (code.length) throw new ConversionError(`The generated backend still fails after ${MAX_FIX_ROUNDS} automatic fix round(s): ${code.map(issue => issue.message.split('\n')[0]).slice(0, 3).join(' | ')}`, { phase: 'self-check', hint: `Details: ${rel(path.join(scope.workDir, 'live-selfcheck.json'))}. Rerun .\\setup.ps1 to try another fix round, or run with --fresh to rebuild.` });
           return check;
         }
-        log.info('self-check', `Asking Gemini to fix ${code.length} issue(s)${check.placeholders.length ? ` and ${check.placeholders.length} placeholder visual(s)` : ''}.`);
-        await runFix({ reason: 'backend-self-check', issues: code, placeholders: check.placeholders, environmentIssues: environment });
+        log.info('self-check', `Asking Gemini to fix ${code.length} issue(s)${check.placeholders.length && !state.placeholderFixDone ? ` and ${check.placeholders.length} placeholder visual(s)` : ''}.`);
+        const placeholders = state.placeholderFixDone ? [] : check.placeholders;
+        if (placeholders.length) state.placeholderFixDone = true;
+        await runFix({ reason: 'backend-self-check', issues: code, placeholders, environmentIssues: environment });
       }
     };
     try {
@@ -829,6 +839,7 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
           for (const [file, backup] of [[htmlFile, 'previous-index.html'], [backendFile, 'previous-backend.mjs']]) if (fs.existsSync(file)) fs.copyFileSync(file, path.join(runDir, backup));
           state.repairs = {};
           state.needsFinalReview = false;
+          state.placeholderFixDone = false;
         }
         await runPhase(phase, ctx);
         recordPhase(state, name, phaseArtifacts(scope, name), stateFile);
@@ -944,11 +955,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
     fresh: args.includes('--fresh'),
     serve: !args.includes('--no-serve') && process.env.HC_NO_SERVE !== 'true',
     port: portIndex >= 0 ? Number(args[portIndex + 1]) : undefined
-  })).catch(error => {
+  })).then(result => {
+    // Without a server nothing else should run; a generated backend's open pool or timer must not keep the window waiting.
+    if (!result?.server) process.stdout.write('', () => process.exit(0));
+  }).catch(error => {
     if (!currentLogFile()) {
       try { startLogFile(path.join(root, 'logs', `converter-failed-${process.pid}.log`)); } catch { /* console only */ }
     }
     reportFailure(error);
-    process.exitCode = 1;
+    process.stdout.write('', () => process.exit(1));
   });
 }

@@ -4,7 +4,7 @@ Read `work/live-interpretation.json`, `work/report-digest.json`, `work/inventory
 
 ## Backend contract (`output/dynamic/backend.mjs`)
 
-Export `async function createBackend({ env, root, inputDir, helpers })` returning `{ healthcheck, query }`.
+Export `async function createBackend({ env, root, inputDir, helpers })` returning `{ healthcheck, query, close }` (`close()` optional: release database pools and timers).
 
 - `env` holds the values from the user's private `.env` (for example `PG_HOST`, `PG_USER`, `PG_PASSWORD`, `PG_SSL_MODE`, `PG_SSL_CA_FILE`, `PG_ALLOW_NATIVE_QUERIES`). Read settings only from `env`, never from `process.env` or files.
 - Do NOT import the converter's scripts with relative paths such as `../../scripts/sources.mjs`: the file is moved after this phase and such paths break. Use `helpers` instead: `helpers.sources` (exports `listLiveSources`, `fetchLivePage`, `postgresNativeQuery`, `postgresQuery`, `loadAllData`, `testPostgresConnection`), `helpers.core` (exports `readCsvFile(path, {delimiter, encoding})` which mirrors `Csv.Document` including its code page, `parseCsv`, `readJson`, `mUnescape`, `resolveMText`), and `await helpers.loadPg()` which returns the installed `pg` module (use `new (await helpers.loadPg()).Pool(...)` or `.Client`).

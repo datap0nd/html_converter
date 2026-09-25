@@ -39,7 +39,7 @@ for (const element of document.querySelectorAll('[data-role="data"]')) {
 `;
 }
 
-export function backendSource(inventory, digest, { broken = false, environmentIssue = false } = {}) {
+export function backendSource(inventory, digest, { broken = false, environmentIssue = false, leakTimer = false, placeholder = false } = {}) {
   const csv = (digest?.sources?.directCsv ?? []).map(source => source.path);
   const postgres = digest?.sources?.postgres ?? [];
   const dataVisuals = inventory.pages.flatMap(page => page.visuals.filter(visual => visual.role === 'data').map(visual => visual.id));
@@ -49,6 +49,7 @@ const POSTGRES = ${JSON.stringify(postgres)};
 const DATA_VISUALS = new Set(${JSON.stringify(dataVisuals)});
 export async function createBackend({ env, helpers }) {
   ${broken ? 'const broken = ;' : ''}
+  ${leakTimer ? 'setInterval(() => {}, 1000);' : ''}
   const sources = POSTGRES.length ? helpers.sources.listLiveSources({ postgresSources: POSTGRES }, env) : [];
   return {
     async healthcheck() {
@@ -62,6 +63,7 @@ export async function createBackend({ env, helpers }) {
     },
     async query({ visualId, limit = 200 }) {
       if (!DATA_VISUALS.has(visualId)) throw new Error('Unknown visual ' + visualId);
+      ${placeholder ? "if (visualId === [...DATA_VISUALS][0]) return { rows: [], columns: [], placeholder: true, limitations: ['Custom visual runtime is not available (test scenario).'] };" : ''}
       if (sources.length) {
         const page = await helpers.sources.fetchLivePage(sources[0], env, { limit: Math.min(limit, 200), offset: 0 });
         return { rows: page.rows, columns: page.columns, placeholder: false, limitations: ['Test model output.'] };
@@ -95,7 +97,7 @@ export function phaseFiles({ prompt, cwd, scenario = '', count = 0 }) {
       break;
     case '02':
       add('output/dynamic/index.html', reportHtml(inventory, { omitVisualIds: switches.has('missing-visual') && lastData ? [lastData.id] : [] }));
-      add('output/dynamic/backend.mjs', backendSource(inventory, digest, { broken: switches.has('broken-backend'), environmentIssue: switches.has('environment-issue') }));
+      add('output/dynamic/backend.mjs', backendSource(inventory, digest, { broken: switches.has('broken-backend'), environmentIssue: switches.has('environment-issue'), leakTimer: switches.has('leak-timer'), placeholder: switches.has('placeholder') }));
       add(artifact, { implemented: dataVisuals.map(visual => visual.id), placeholders: [], limitations: [], sourcePaths: [], credentialsNeeded: [], filtersContract: {} });
       break;
     case '03':
@@ -113,7 +115,7 @@ export function phaseFiles({ prompt, cwd, scenario = '', count = 0 }) {
     }
     case '06':
       add('output/dynamic/index.html', reportHtml(inventory));
-      add('output/dynamic/backend.mjs', backendSource(inventory, digest));
+      add('output/dynamic/backend.mjs', backendSource(inventory, digest, { placeholder: switches.has('placeholder') }));
       add(artifact, { status: 'fixed', fixed: ['test fix'], remaining: [], changedFiles: ['output/dynamic/backend.mjs'] });
       break;
     default:

@@ -289,6 +289,20 @@ for (const [name, scenario, calls, message] of recoveries) {
   }));
 }
 
+test('end to end: a visual that stays a placeholder gets one fix round, then is served and listed', withSandbox(async sandbox => {
+  const result = await runConverter(sandbox, { scenario: 'placeholder' });
+  assert.equal(result.code, 0, result.stdout);
+  assert.deepEqual(result.calls, ['01', '02', '06', '03']);
+  assert.match(result.stdout, /is an explicit placeholder: Custom visual runtime is not available/);
+}));
+
+test('end to end: a failed run exits even if the generated backend leaves a timer running', withSandbox(async sandbox => {
+  const started = Date.now();
+  const result = await runConverter(sandbox, { scenario: 'environment-issue,leak-timer' });
+  assert.equal(result.code, 1);
+  assert.ok(Date.now() - started < 20_000, 'the process must not hang on the backend timer');
+}));
+
 test('end to end: an expired Gemini sign-in stops at once with instructions', withSandbox(async sandbox => {
   const started = Date.now();
   const result = await runConverter(sandbox, { scenario: 'sign-in-prompt' });
