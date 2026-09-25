@@ -32,6 +32,18 @@ function packageEntry(packageDir) {
   return null;
 }
 
+// npm's cmd-shim files name their JavaScript entry as "%dp0%\\node_modules\\...\\gemini.js".
+export function shimTarget(shim) {
+  if (!/\.(cmd|bat)$/i.test(shim)) return null;
+  try {
+    const text = fs.readFileSync(shim, 'utf8');
+    const match = /"%(?:~)?dp0%?\\?([^"%]+?\.(?:m?js|cjs))"/i.exec(text);
+    if (!match) return null;
+    const entry = path.resolve(path.dirname(shim), match[1].replaceAll('\\', path.sep));
+    return fs.existsSync(entry) ? entry : null;
+  } catch { return null; }
+}
+
 function onPath(name, env) {
   const searchPath = env.PATH || env.Path || env.path || '';
   for (const directory of searchPath.split(path.delimiter).filter(Boolean)) {
@@ -52,6 +64,8 @@ export function geminiCliInfo(env = process.env) {
     const entry = npmGeminiEntry(env);
     if (entry) return { found: true, entry, command: process.execPath, prefix: [entry], version: packageVersion(entry), source: 'npm global install' };
     const shim = onPath('gemini.cmd', env) || onPath('gemini.exe', env) || onPath('gemini.bat', env);
+    const target = shim ? shimTarget(shim) : null;
+    if (target) return { found: true, entry: target, command: process.execPath, prefix: [target], version: packageVersion(target), source: `npm shim ${shim}` };
     return { found: Boolean(shim), entry: shim, command: env.ComSpec || process.env.ComSpec || 'cmd.exe', prefix: null, version: null, source: shim ? 'PATH shim' : null };
   }
   const bin = onPath('gemini', env);

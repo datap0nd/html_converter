@@ -7,7 +7,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { createSandbox, geminiDir, fixturesDir } from './support/fixtures.mjs';
 import { parseTmdl, loadSemanticModel, scopeModel, daxReferences, mReferences, parseQualifiedColumn } from '../scripts/digest.mjs';
 import { classifyVisual, visualTitle, describeField } from '../scripts/pbir.mjs';
-import { runGeminiStream, unsupportedFlag, toolTarget } from '../scripts/gemini.mjs';
+import { runGeminiStream, unsupportedFlag, toolTarget, shimTarget } from '../scripts/gemini.mjs';
 import { selectPages, classifyBackendIssue, diagnoseGeminiFailure, normalizeReviewStatus, validateLiveReport, stagedInputAllowed, scopedConnectors, responseTextArtifact, phaseSettings } from '../scripts/start-live-report.mjs';
 import { consoleSafe, redact, addSecret } from '../scripts/log.mjs';
 
@@ -157,6 +157,18 @@ test('older Gemini CLI flag rejections are recognised', () => {
   assert.equal(unsupportedFlag({ stderrTail: 'Unknown arguments: skip-trust, skipTrust' }), '--skip-trust');
   assert.equal(unsupportedFlag({ stderrTail: 'Warning: 256-color support not detected.' }), null);
   assert.equal(toolTarget({ file_path: '/tmp/html-converter-gemini-AbC123/work/x.json', content: 'abc' }), ' work/x.json (3 B)');
+});
+
+test('an npm gemini.cmd shim resolves to its JavaScript entry', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'html-converter-test-'));
+  try {
+    const entry = path.join(dir, 'node_modules', '@google', 'gemini-cli', 'bundle', 'gemini.js');
+    fs.mkdirSync(path.dirname(entry), { recursive: true });
+    fs.writeFileSync(entry, '');
+    fs.writeFileSync(path.join(dir, 'gemini.cmd'), '@ECHO off\r\nIF EXIST "%dp0%\\node.exe" (\r\n  SET "_prog=%dp0%\\node.exe"\r\n)\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@google\\gemini-cli\\bundle\\gemini.js" %*\r\n');
+    assert.equal(shimTarget(path.join(dir, 'gemini.cmd')), entry);
+    assert.equal(shimTarget(path.join(dir, 'missing.cmd')), null);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('failure diagnosis gives an actionable hint for each common cause', () => {

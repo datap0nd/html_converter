@@ -411,8 +411,9 @@ async function runPhase([name, promptFile, expectedFile], ctx) {
     } else if (outputsEdited(name)) {
       for (const file of ['index.html', 'backend.mjs']) fs.copyFileSync(path.join(scope.dynamicDir, file), path.join(stage, 'output', 'dynamic', file));
     }
-    const lastProblem = result?.events?.filter(event => event.type === 'error' || (event.type === 'tool_result' && event.summary)).map(event => event.summary).at(-1);
-    const repairInstruction = attempt > 1 && missing.length ? ` A previous attempt ended without producing these required files: ${missing.join(', ')}${lastProblem ? ` (it ended with: ${lastProblem.slice(0, 200)})` : ''}. Do not repeat identical tool calls and do not switch to plan mode. Write every required file now with write_file.` : '';
+    // Quoted back to Gemini; characters cmd.exe treats specially are removed for the shim launcher.
+    const lastProblem = result?.events?.filter(event => event.type === 'error' || (event.type === 'tool_result' && event.summary)).map(event => event.summary).at(-1)?.replace(/["%!&|<>()^\r\n]/g, ' ');
+    const repairInstruction = attempt > 1 && missing.length ? ` A previous attempt ended without producing these required files: ${missing.join(', ')}${lastProblem ? `; it ended with: ${lastProblem.slice(0, 200)}` : ''}. Do not repeat identical tool calls and do not switch to plan mode. Write every required file now with write_file.` : '';
     const args = ['--model', MODEL, ...(cli.skipTrust ? ['--skip-trust'] : []), '-e', 'none', '--approval-mode', 'auto_edit', '--output-format', cli.outputFormat, '-p', prompt + repairInstruction];
     const label = `${name}.attempt-${attempt}`;
     log.info(name, `Attempt ${attempt} of ${settings.maxAttempts}: Gemini ${MODEL} running. Live transcript: ${rel(path.join(runDir, `${label}.events.jsonl`))}`);
