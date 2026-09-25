@@ -5,9 +5,14 @@ import path from 'node:path';
 // Environment names Gemini CLI itself may need for authentication or routing.
 const GEMINI_ENV = /^(GEMINI_[A-Z0-9_]*|GOOGLE_API_KEY|GOOGLE_APPLICATION_CREDENTIALS|GOOGLE_CLOUD_[A-Z0-9_]*|GOOGLE_GENAI_[A-Z0-9_]*|GOOGLE_GEMINI_BASE_URL|GOOGLE_VERTEX_BASE_URL)$/;
 
-function npmGeminiEntry(env) {
+// PATH entries may be quoted or padded ("C:\\Program Files\\nodejs"); Windows ignores both.
+function pathDirectories(env) {
   const searchPath = env.PATH || env.Path || env.path || '';
-  const directories = new Set(searchPath.split(path.delimiter).filter(Boolean));
+  return searchPath.split(path.delimiter).map(entry => entry.trim().replace(/^"(.*)"$/, '$1').trim()).filter(Boolean);
+}
+
+function npmGeminiEntry(env) {
+  const directories = new Set(pathDirectories(env));
   if (env.APPDATA) directories.add(path.join(env.APPDATA, 'npm'));
   for (const prefix of [env.npm_config_prefix, env.NPM_CONFIG_PREFIX]) if (prefix) directories.add(prefix);
   for (const directory of directories) {
@@ -45,8 +50,7 @@ export function shimTarget(shim) {
 }
 
 function onPath(name, env) {
-  const searchPath = env.PATH || env.Path || env.path || '';
-  for (const directory of searchPath.split(path.delimiter).filter(Boolean)) {
+  for (const directory of pathDirectories(env)) {
     const candidate = path.join(directory, name);
     try { if (fs.statSync(candidate).isFile()) return candidate; } catch { /* keep looking */ }
   }
@@ -94,11 +98,14 @@ function packageVersion(entry) {
 // - NO_RELAUNCH keeps one process (the relauncher ignores SIGTERM and orphans its worker on kill);
 // - TRUST_WORKSPACE applies the staged .gemini/settings.json (--skip-trust does not) and works on 0.40+;
 // - NO_BROWSER turns an expired Google sign-in into exit 41 instead of an unanswerable [Y/n] prompt;
-// - COLORTERM removes the "256-color support not detected" warning (NO_COLOR does not).
-export const HEADLESS_ENV = { GEMINI_CLI_NO_RELAUNCH: 'true', GEMINI_CLI_TRUST_WORKSPACE: 'true', NO_BROWSER: 'true', COLORTERM: 'truecolor', NO_COLOR: '1' };
+// - COLORTERM removes the "256-color support not detected" warning (NO_COLOR does not);
+// - GEMINI_SANDBOX=false overrides a user's sandbox setting (docker/podman relaunch).
+export const HEADLESS_ENV = { GEMINI_CLI_NO_RELAUNCH: 'true', GEMINI_CLI_TRUST_WORKSPACE: 'true', NO_BROWSER: 'true', COLORTERM: 'truecolor', NO_COLOR: '1', GEMINI_SANDBOX: 'false' };
 
 export function geminiChildEnv(extra = {}, base = process.env) {
   const childEnv = { ...base, ...HEADLESS_ENV, ...extra };
+  // Debug switches flood stderr; SANDBOX makes the CLI believe it already runs inside a sandbox.
+  for (const key of ['DEBUG', 'DEBUG_MODE', 'SANDBOX']) delete childEnv[key];
   // The model may need its own auth, but must never inherit source credentials.
   for (const key of Object.keys(childEnv)) {
     if (GEMINI_ENV.test(key)) continue;
@@ -111,15 +118,23 @@ function invocation(args, options = {}) {
   const env = geminiChildEnv(options.env);
   const info = options.cli ?? geminiCliInfo(env);
   const common = { cwd: options.cwd, env, windowsHide: true };
-  // Without the relauncher, raise the heap limit the way it would have.
-  if (info.prefix) return { command: info.command, args: [...(info.command === process.execPath && info.prefix.length ? ['--max-old-space-size=4096'] : []), ...info.prefix, ...args], common, info };
-  // npm installs Gemini CLI as gemini.cmd on Windows. Invoke cmd explicitly;
-  // Node 22+/24 deprecates passing an args array with shell:true.
+  if (info.prefix) return { command: info.command, args: [...(info.command === process.execPath && info.prefix.length ? nodeFlags() : []), ...info.prefix, ...args], common, info };
+  // Only a gemini.exe/unparsable shim is left: run it through cmd with a verbatim command line
+  // (libuv would otherwise escape quotes as \" and cmd would split the prompt).
   const encoded = args.map(value => {
-    if (/["%!&|<>()^\r\n]/.test(value)) throw new Error('Unsafe Gemini launcher argument');
-    return /^[A-Za-z0-9._/-]+$/.test(value) ? value : `"${value}"`;
+    const safe = String(value).replace(/["%!^&|<>()\r\n]/g, ' ');
+    return /^[A-Za-z0-9._/:=-]+$/.test(safe) ? safe : `"${safe}"`;
   });
-  return { command: info.command, args: ['/d', '/s', '/c', ['gemini', ...encoded].join(' ')], common, info };
+  return { command: info.command, args: ['/d', '/s', '/c', `"gemini ${encoded.join(' ')}"`], common: { ...common, windowsVerbatimArguments: true }, info };
+}
+
+// Flags for the node process that runs the Gemini CLI entry: the heap the relauncher would
+// have set, and (Node 22.15+/23.8+) the Windows/macOS certificate store, so corporate TLS
+// inspection works without exporting a PEM file.
+export function nodeFlags() {
+  const flags = ['--max-old-space-size=4096'];
+  if (process.allowedNodeEnvironmentFlags?.has('--use-system-ca')) flags.push('--use-system-ca');
+  return flags;
 }
 
 export function runGemini(args, options = {}) {
@@ -133,7 +148,9 @@ export function killProcessTree(child) {
   if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
   if (process.platform === 'win32') {
     // Gemini CLI can relaunch itself in a child node process; kill the whole tree.
-    spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 15000 });
+    const result = spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 15000 });
+    // taskkill missing or blocked by policy: at least terminate the direct child.
+    if (result.error || result.status !== 0) { try { child.kill('SIGKILL'); } catch { /* already gone */ } }
   } else {
     try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* already gone */ } }
   }
@@ -193,27 +210,39 @@ export function runGeminiStream(args, options = {}) {
   const stderrFd = options.stderrFile ? fs.openSync(options.stderrFile, 'a') : null;
   installExitHook();
   return new Promise(resolve => {
-    const started = Date.now();
+    let started = Date.now();
     let lastActivity = started;
     let child;
     try {
       child = spawn(call.command, call.args, { ...call.common, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
     } catch (error) {
       for (const fd of [eventsFd, stderrFd]) if (fd !== null) fs.closeSync(fd);
-      resolve({ status: null, error, events: [], assistantText: '', stdoutTail: '', stderrTail: '', durationMs: 0, cli: call.info });
+      resolve({ status: null, error, events: [], errorMessages: [], plainStdout: '', assistantText: '', stdoutTail: '', stderrTail: '', durationMs: 0, pausedMs: 0, cli: call.info });
       return;
     }
     activeChildren.add(child);
-    const events = [];
-    let assistantText = '', stdoutTail = '', stderrTail = '', stdoutPartial = '', stderrPartial = '';
-    let error = null, timedOut = false, stalled = false, interactivePrompt = null, finalResult = null, settled = false, lastSummary = null;
-    const keepTail = (current, text) => (current + text).slice(-64 * 1024);
-    const stop = () => killProcessTree(child);
+    const events = [], errorMessages = [];
+    // plainStdout: non-JSON stdout (prompts, fatal text). Diagnosis must never read raw events,
+    // which contain the files the model writes (any word can appear in them).
+    let assistantText = '', stdoutTail = '', stderrTail = '', plainStdout = '', stdoutPartial = '', stderrPartial = '';
+    let error = null, timedOut = false, stalled = false, aborted = null, interactivePrompt = null, finalResult = null, settled = false, lastSummary = null, pausedMs = 0;
+    const keepTail = (current, text, limit = 64 * 1024) => (current + text).slice(-limit);
+    let hardTimer = null;
+    const stop = () => {
+      killProcessTree(child);
+      // If the process cannot be killed (policy, access denied), stop waiting for it anyway.
+      hardTimer ??= setTimeout(() => { child.stdout?.destroy(); child.stderr?.destroy(); finish(null, 'SIGKILL'); }, 20000);
+    };
     const checkPrompt = text => {
       if (interactivePrompt || !INTERACTIVE_PROMPT.test(text)) return;
       interactivePrompt = text.trim().slice(-300);
       options.onPrompt?.(interactivePrompt);
       stop();
+    };
+    const checkAbort = (line, source) => {
+      if (aborted || !options.shouldAbort) return;
+      const reason = options.shouldAbort(line, source);
+      if (reason) { aborted = reason; stop(); }
     };
     const handleStdoutLine = line => {
       if (eventsFd !== null) fs.writeSync(eventsFd, line + '\n');
@@ -222,12 +251,15 @@ export function runGeminiStream(args, options = {}) {
       let event = null;
       if (trimmed.startsWith('{')) { try { event = JSON.parse(trimmed); } catch { /* plain text */ } }
       if (!event || typeof event.type !== 'string') {
+        plainStdout = keepTail(plainStdout, trimmed + '\n', 16 * 1024);
         checkPrompt(trimmed);
         options.onText?.(trimmed);
         return;
       }
       if (event.type === 'message' && event.role === 'assistant') assistantText += event.content ?? '';
-      if (event.type === 'result') finalResult = event;
+      if (event.type === 'result') { finalResult = event; if (event.error?.message) errorMessages.push(String(event.error.message)); }
+      if (event.type === 'error' && event.message) errorMessages.push(String(event.message));
+      if (errorMessages.length > 50) errorMessages.splice(0, errorMessages.length - 50);
       const summary = summarizeStreamEvent(event);
       if (summary) lastSummary = summary;
       if (event.type !== 'message' || event.role === 'assistant') events.push({ type: event.type, at: Date.now() - started, summary, tool: event.tool_name, parameters: event.type === 'tool_use' ? { ...event.parameters, content: undefined } : undefined });
@@ -243,8 +275,8 @@ export function runGeminiStream(args, options = {}) {
       const lines = stdoutPartial.split(/\r?\n/);
       stdoutPartial = lines.pop();
       for (const line of lines) handleStdoutLine(line);
-      // Prompts are printed without a trailing newline.
-      if (stdoutPartial) checkPrompt(stdoutPartial);
+      // Prompts are printed without a trailing newline; a half-received JSON event is not a prompt.
+      if (stdoutPartial && !stdoutPartial.trimStart().startsWith('{')) checkPrompt(stdoutPartial);
     });
     child.stderr.on('data', chunk => {
       lastActivity = Date.now();
@@ -253,31 +285,39 @@ export function runGeminiStream(args, options = {}) {
       stderrPartial += chunk;
       const lines = stderrPartial.split(/\r?\n/);
       stderrPartial = lines.pop();
-      for (const line of lines) if (line.trim()) { checkPrompt(line); options.onStderr?.(line); }
+      for (const line of lines) if (line.trim()) { checkPrompt(line); checkAbort(line, 'stderr'); options.onStderr?.(line); }
       if (stderrPartial) checkPrompt(stderrPartial);
     });
     child.on('error', value => { error = value; });
+    const tickMs = Math.min(5000, Math.max(50, Math.floor(Math.min(timeoutMs, idleTimeoutMs || timeoutMs) / 4)));
+    let lastTick = Date.now();
     const watchdog = setInterval(() => {
       const now = Date.now();
+      // A laptop that slept did not let Gemini run: move the clocks forward by the pause.
+      const gap = now - lastTick - tickMs;
+      lastTick = now;
+      if (gap > 30000) { pausedMs += gap; started += gap; lastActivity += gap; options.onPause?.(gap); }
       if (now - started >= timeoutMs) { timedOut = true; stop(); return; }
       if (idleTimeoutMs && now - lastActivity >= idleTimeoutMs) { stalled = true; stop(); return; }
       options.onIdle?.(now - lastActivity, lastSummary, now - started);
-    }, Math.min(5000, Math.max(50, Math.floor(Math.min(timeoutMs, idleTimeoutMs || timeoutMs) / 4))));
+    }, tickMs);
     let forceTimer = null;
     const finish = (status, signal) => {
       if (settled) return;
       settled = true;
       clearInterval(watchdog);
       clearTimeout(forceTimer);
+      clearTimeout(hardTimer);
       activeChildren.delete(child);
       if (stdoutPartial) handleStdoutLine(stdoutPartial);
       if (stderrPartial.trim()) options.onStderr?.(stderrPartial);
       for (const fd of [eventsFd, stderrFd]) if (fd !== null) { try { fs.closeSync(fd); } catch { /* already closed */ } }
       const minutes = value => value < 60000 ? `${Math.round(value / 1000)} second(s)` : `${Math.round(value / 60000 * 10) / 10} minute(s)`;
       if (interactivePrompt) error = new Error(`Gemini CLI stopped at an interactive prompt that cannot be answered in this unattended run: "${interactivePrompt}"`);
+      else if (aborted) error = new Error(aborted);
       else if (timedOut) error = new Error(`Gemini phase timed out after ${minutes(timeoutMs)}.`);
       else if (stalled) error = new Error(`Gemini produced no output for ${minutes(idleTimeoutMs)} and was stopped as stalled.`);
-      resolve({ status, signal, error, timedOut, stalled, interactivePrompt, finalResult, events, assistantText, stdoutTail, stderrTail, durationMs: Date.now() - started, lastSummary, cli: call.info });
+      resolve({ status, signal, error, timedOut, stalled, aborted, interactivePrompt, finalResult, events, errorMessages, plainStdout, assistantText, stdoutTail, stderrTail, durationMs: Date.now() - started, pausedMs, lastSummary, cli: call.info });
     };
     // 'close' waits for stdio to end; a grandchild holding the pipes open must not hang us.
     child.on('exit', (status, signal) => { forceTimer = setTimeout(() => finish(status, signal), 5000); });

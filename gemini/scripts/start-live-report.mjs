@@ -4,7 +4,8 @@ import http from 'node:http';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { pathToFileURL } from 'node:url';
+import vm from 'node:vm';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import { root, inputDir, workDir, dynamicDir, discover, writeJson, readJson } from './core.mjs';
 import { loadLocalEnv } from './env.mjs';
 import { runGeminiStream, geminiCliInfo, toolTarget, unsupportedFlag, formatBytes } from './gemini.mjs';
@@ -61,12 +62,18 @@ export function pageLimitFromArgs(args) {
 // Hidden tooltip/drillthrough pages only fill in when there are too few visible ones.
 export function selectPages(pages, pageLimit) {
   if (!pageLimit) return pages;
+  const hasData = page => (page.dataVisualCount ?? (page.visuals ?? []).filter(visual => visual.role === 'data').length) > 0;
   const hasContent = page => (page.visuals ?? []).some(visual => visual.role !== 'group');
-  // Visible pages with visuals first; empty or hidden pages only fill remaining slots.
+  const bound = page => /tooltip|drillthrough/i.test(String(page.pageType ?? ''));
+  // Pages a reader navigates to that show data first; covers, tooltip/drillthrough and hidden pages only fill the rest.
+  const tiers = [
+    pages.filter(page => !page.hidden && !bound(page) && hasData(page)),
+    pages.filter(page => !page.hidden && !bound(page) && !hasData(page) && hasContent(page)),
+    pages.filter(page => !page.hidden),
+    pages
+  ];
   const chosen = [];
-  for (const candidates of [pages.filter(page => !page.hidden && hasContent(page)), pages.filter(page => !page.hidden && !hasContent(page)), pages.filter(page => page.hidden)]) {
-    for (const page of candidates) if (chosen.length < pageLimit) chosen.push(page);
-  }
+  for (const tier of tiers) for (const page of tier) if (chosen.length < pageLimit && !chosen.includes(page)) chosen.push(page);
   const ids = new Set(chosen.map(page => page.id));
   return pages.filter(page => ids.has(page.id));
 }
@@ -129,15 +136,17 @@ export function reportPathIsInScope(relativePath, selectedPageIds) {
 // Desktop caches/settings, and diagram layouts.
 export function stagedInputAllowed(relativePath) {
   const normalized = relativePath.replaceAll('\\', '/');
-  if (/(^|\/)(?:\.pbi|cultures|TMDLScripts|DAXQueries|StaticResources)(\/|$)/i.test(normalized)) return false;
-  if (/(^|\/)diagramLayout\.json$/i.test(normalized)) return false;
+  if (/(^|\/)(?:\.pbi|cultures|TMDLScripts|DAXQueries|CustomVisuals)(\/|$)/i.test(normalized)) return false;
+  // Custom report themes are useful styling input; images and the large built-in base themes are not.
+  if (/(^|\/)StaticResources(\/|$)/i.test(normalized) && !/(^|\/)StaticResources\/RegisteredResources\/[^/]+\.json$/i.test(normalized) && !/(^|\/)StaticResources(\/RegisteredResources)?$/i.test(normalized)) return false;
+  if (/(^|\/)(?:diagramLayout|semanticModelDiagramLayout)\.json$/i.test(normalized)) return false;
   return true;
 }
 
 const STAGE_PREFIX = 'html-converter-gemini-';
 
 export const STAGE_SETTINGS = {
-  tools: { core: ['list_directory', 'read_file', 'grep_search', 'search_file_content', 'glob', 'write_file', 'replace'], useRipgrep: false },
+  tools: { core: ['list_directory', 'read_file', 'grep_search', 'search_file_content', 'glob', 'write_file', 'replace'], useRipgrep: false, sandbox: false },
   mcp: { allowed: ['html-converter-no-mcp-servers'] },
   general: { plan: { enabled: false }, checkpointing: { enabled: false } },
   ui: { showCompatibilityWarnings: false },
@@ -226,23 +235,36 @@ function preserveStage(stage, runDir, name) {
   return target;
 }
 
+// Text that describes a failed Gemini run: its error, error events, stderr, and plain stdout.
+// Raw stream-json events are excluded: they carry the files the model writes, and words in
+// generated code ("certificate", "oauth", "not found") must never decide the diagnosis.
+function geminiFailureText(result) {
+  let envelopeError = null;
+  const stdout = result?.stdout ?? result?.stdoutTail ?? '';
+  try { const parsed = JSON.parse(stdout); envelopeError = typeof parsed?.error === 'string' ? parsed.error : parsed?.error?.message ?? parsed?.error?.details ?? null; } catch { /* not a json envelope */ }
+  const plain = result?.plainStdout ?? (envelopeError === null && !/^\s*[{\[]/.test(stdout) ? stdout : '');
+  return [result?.status, result?.error?.message, result?.finalResult?.error?.message, ...(result?.errorMessages ?? []), envelopeError, result?.stderr ?? result?.stderrTail, plain, result?.debugTail]
+    .filter(value => value !== undefined && value !== null && value !== '').map(String).join('\n');
+}
+
+function cleanStderr(text) {
+  return String(text ?? '').split(/\r?\n/).filter(line => line.trim() && !STDERR_NOISE.test(line) && !/^\s+at\s/.test(line)).join('\n').trim();
+}
+
 export function geminiFailureDetail(result, env = {}) {
   let parsed;
-  const stdout = result.stdout ?? result.stdoutTail ?? '';
-  const stderr = result.stderr ?? result.stderrTail ?? '';
-  try { parsed = JSON.parse(stdout); } catch {}
-  const streamError = result.finalResult?.error?.message;
-  const cleanStderr = stderr.split(/\r?\n/).filter(line => !STDERR_NOISE.test(line) && !/^\s+at\s/.test(line)).join('\n').trim();
-  const message = parsed?.error?.message || parsed?.error?.details || streamError || cleanStderr || stdout.trim() || stderr.trim() || result.error?.message || 'No diagnostic text from Gemini CLI.';
+  try { parsed = JSON.parse(result.stdout ?? result.stdoutTail ?? ''); } catch {}
+  const streamError = result.finalResult?.error?.message ?? result.errorMessages?.at(-1);
+  const last = result.lastSummary ? `Last Gemini activity: ${result.lastSummary}.` : '';
+  const stdout = String(result.stdout ?? result.stdoutTail ?? '');
+  const plain = String(result.plainStdout ?? (/^\s*[{[]/.test(stdout) ? '' : stdout)).trim();
+  const envelope = typeof parsed?.error === 'string' ? parsed.error : parsed?.error?.message || parsed?.error?.details;
+  const message = envelope || streamError || cleanStderr(result.stderr ?? result.stderrTail) || plain || last || result.error?.message || 'No diagnostic text from Gemini CLI.';
   let detail = typeof message === 'string' ? message : JSON.stringify(message);
   for (const [key, value] of Object.entries(env)) {
     if (/(PASSWORD|SECRET|TOKEN|API_KEY|CONNECTION_STRING)/i.test(key) && typeof value === 'string' && value.length > 3) detail = detail.replaceAll(value, '[redacted]');
   }
   return detail.length > 1800 ? `${detail.slice(0, 900)}\n... [truncated] ...\n${detail.slice(-900)}` : detail;
-}
-
-function geminiFailureText(result) {
-  return [result?.status, result?.error?.message, result?.finalResult?.error?.message, result?.stderr ?? result?.stderrTail, result?.stdout ?? result?.stdoutTail].filter(value => value !== undefined && value !== null).join('\n');
 }
 
 export function isTransientGeminiFailure(result) {
@@ -261,6 +283,13 @@ export function diagnoseGeminiFailure(result) {
   const text = geminiFailureText(result);
   const signIn = 'Open a new PowerShell window, run: gemini   Complete the Google sign-in in the browser (or set GEMINI_API_KEY), type /quit, then rerun .\\setup.ps1. Completed phases are kept.';
   if (result?.interactivePrompt) return { kind: 'sign-in', retry: false, hint: `Gemini CLI is waiting for an interactive answer (usually an expired Google sign-in). ${signIn}` };
+  const network = /UNABLE_TO_GET_ISSUER_CERT_LOCALLY|SELF_SIGNED_CERT|unable to verify the first certificate|certificate|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNREFUSED|ECONNRESET|ENETUNREACH|fetch failed|getaddrinfo|proxy/i;
+  // Exit 41 can also mean the Google sign-in could not be refreshed through the network.
+  if (Number(result?.status) === 41 && network.test(String(result?.debugTail ?? ''))) {
+    const cause = String(result.debugTail).split(/\r?\n/).find(line => network.test(line))?.trim().slice(0, 300);
+    return { kind: 'network', retry: false, hint: `Gemini CLI could not refresh your Google sign-in because the network or proxy failed (${cause}). Check VPN/Internet; behind a proxy set $env:HTTPS_PROXY in the PowerShell window; for TLS inspection ask IT for the root certificate and set $env:NODE_EXTRA_CA_CERTS.` };
+  }
+  if (result?.aborted) return { kind: 'network', retry: false, hint: `${result.aborted} Check VPN/Internet. Behind a proxy set $env:HTTPS_PROXY = "http://proxy:port" in the same PowerShell window; for TLS inspection set $env:NODE_EXTRA_CA_CERTS to the corporate root certificate (.pem) from IT. Then rerun .\\setup.ps1; completed phases are kept.` };
   if (result?.error?.code === 'ENOENT' || /is not recognized as an internal or external command|command not found/i.test(text)) return { kind: 'missing-cli', retry: false, hint: 'Gemini CLI is not installed or not on PATH. Run: npm install -g @google/gemini-cli   then open a new PowerShell window and rerun .\\setup.ps1.' };
   if (Number(result?.status) === 41 || /FatalAuthenticationError|UNAUTHENTICATED|API key not valid|invalid api key|Please set an Auth method|auth(?:entication)? (?:failed|required)|login required|oauth|PERMISSION_DENIED/i.test(text)) return { kind: 'auth', retry: false, hint: `Gemini CLI could not authenticate. ${signIn}` };
   if (/models\/[\w.-]+ is not found|model[^\n]{0,40}not found|NOT_FOUND|not supported for generateContent|Requested entity was not found/i.test(text)) return { kind: 'model', retry: false, hint: `The pinned model ${MODEL} is not available to this Google account or Gemini CLI version. Update the CLI with: npm install -g @google/gemini-cli@latest   and check the account has access to ${MODEL}.` };
@@ -269,7 +298,9 @@ export function diagnoseGeminiFailure(result) {
   if ([400, 144].includes(Number(result?.status)) || /INVALID_ARGUMENT/.test(text)) return { kind: 'request', retry: false, hint: 'The Gemini API rejected the request (HTTP 400). The message above says why; if it mentions the API key, set a valid GEMINI_API_KEY or sign in again with gemini.' };
   if ([403, 147].includes(Number(result?.status))) return { kind: 'auth', retry: false, hint: `The Gemini API refused access (HTTP 403): the account/project may lack access to ${MODEL} or the API is disabled. ${signIn}` };
   if (/UNABLE_TO_GET_ISSUER_CERT_LOCALLY|SELF_SIGNED_CERT|unable to verify the first certificate|certificate/i.test(text)) return { kind: 'network', retry: false, hint: 'Gemini CLI does not trust the corporate proxy certificate. Before running setup, in the same PowerShell window run: $env:NODE_EXTRA_CA_CERTS = "C:\\path\\to\\corporate-root-ca.pem"   (ask IT for the file).' };
-  if (/ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNREFUSED|ENETUNREACH|fetch failed|getaddrinfo|proxy/i.test(text)) return { kind: 'network', retry: true, hint: 'Gemini CLI could not reach Google. Check VPN/Internet. Behind a proxy, set $env:HTTPS_PROXY = "http://proxy:port" in the same PowerShell window before running setup.' };
+  if (/PerDay|per day|daily limit|QUOTA_EXHAUSTED|TerminalQuotaError|limit: 0\b/i.test(text)) return { kind: 'quota-daily', retry: false, hint: 'The Gemini quota for today (or for this key/project) is used up. Retrying now cannot succeed. Rerun .\\setup.ps1 after the quota resets, or use another API key/project; completed phases are kept.' };
+  // Gemini CLI already retried network errors ten times on its own; another attempt would repeat that.
+  if (/ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNREFUSED|ENETUNREACH|fetch failed|getaddrinfo|proxy/i.test(text)) return { kind: 'network', retry: false, hint: 'Gemini CLI could not reach Google. Check VPN/Internet. Behind a proxy, set $env:HTTPS_PROXY = "http://proxy:port" in the same PowerShell window before running setup.' };
   if (isTransientGeminiFailure(result)) return { kind: 'quota', retry: true, hint: 'Gemini rate limit or capacity error. Wait a few minutes and rerun .\\setup.ps1; completed phases are kept.' };
   if (result?.stalled || result?.timedOut) return { kind: result.stalled ? 'stall' : 'timeout', retry: true, hint: 'Gemini stopped making progress. Rerun .\\setup.ps1 to resume from this phase. If it keeps happening, raise GEMINI_IDLE_TIMEOUT_MINUTES / GEMINI_ATTEMPT_TIMEOUT_MINUTES in gemini/.env and send the log file named below.' };
   return { kind: 'other', retry: true, hint: 'Rerun .\\setup.ps1 to retry from this phase. If it repeats, send the log file named below.' };
@@ -298,30 +329,59 @@ export function responseTextArtifact(text) {
 }
 
 export function normalizeReviewStatus(value) {
-  const text = String(value ?? '').toLowerCase();
-  if (/block|fail|reject/.test(text)) return 'blocked';
+  const text = String(value ?? '').trim().toLowerCase();
+  if (!text) return 'missing';
+  // "warnings (non-blocking)" is not a block; "not approved" and "incomplete" are.
+  const blocked = /^block|\bblocked\b|not\s+approved|\bincomplete\b|\breject|\bfail/.test(text.replace(/\bnon[- ]?blocking\b/g, ''));
+  if (blocked) return 'blocked';
   if (/warn/.test(text)) return 'warnings';
-  if (/pass|approv|^ok$|complete/.test(text)) return 'pass';
-  return text ? 'unknown' : 'missing';
+  if (/^pass|^approved|^ok$|^complete|^success/.test(text)) return 'pass';
+  return 'unknown';
 }
 
-export function validateLiveReport(inventory, markup, review, env = {}) {
+const asArray = value => Array.isArray(value) ? value : value === undefined || value === null || value === '' ? [] : [value];
+
+// Checks on the generated HTML that do not need a review: they run after every build and fix
+// round, and failures go back to Gemini instead of stopping the run at the very end.
+export function staticReportIssues(inventory, markup, env = {}, { coverage = true } = {}) {
   const issues = [];
-  if (!/<html\b/i.test(markup) || !/<script\b/i.test(markup)) issues.push('Generated HTML is not an interactive report.');
-  if (!markup.includes('/api/report')) issues.push('Generated HTML does not call its live backend.');
-  if (!/id\s*=\s*["']report-status["']/.test(markup)) issues.push('Generated HTML lacks a visible report status.');
+  if (!/<html\b/i.test(markup) || !/<script\b/i.test(markup)) issues.push('Generated HTML is not an interactive report (no <html> or <script>).');
+  if (!markup.includes('/api/report')) issues.push('Generated HTML does not call its live backend at /api/report.');
+  if (!/id\s*=\s*["']report-status["']/.test(markup)) issues.push('Generated HTML lacks the visible element with id="report-status".');
   if (/Visual mapping pending|Visual reconstruction pending review|Live source data<\/h2>/i.test(markup)) issues.push('Generated HTML is still a source preview.');
-  if (/<(?:script|link|img)\b[^>]+(?:src|href)\s*=\s*["'](?:https?:)?\/\//i.test(markup)) issues.push('Generated HTML loads external assets.');
-  for (const page of inventory.pages) {
+  if (/<(?:script|link|img)\b[^>]+(?:src|href)\s*=\s*["'](?:https?:)?\/\//i.test(markup)) issues.push('Generated HTML loads external assets (CDN or remote URL); inline them.');
+  for (const [index, match] of [...markup.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)].entries()) {
+    const attributes = match[1];
+    if (/\bsrc\s*=/.test(attributes) || /type\s*=\s*["'](?!text\/javascript|application\/javascript)[^"']+["']/i.test(attributes)) continue;
+    try { new vm.Script(match[2], { filename: `index.html inline script ${index + 1}` }); }
+    catch (error) { issues.push(`JavaScript syntax error in inline script ${index + 1} of index.html: ${error.message}`); }
+  }
+  if (coverage) for (const page of inventory.pages) {
     if (!hasMarker(markup, 'data-page-id', page.id)) issues.push(`Missing page ${page.id}.`);
     for (const visual of requiredVisuals(page)) if (!hasMarker(markup, 'data-visual-id', visual.id)) issues.push(`Missing visual ${visual.id}.`);
   }
   for (const [key, value] of Object.entries(env)) {
-    if (/(PASSWORD|SECRET|TOKEN|API_KEY|CONNECTION_STRING)/i.test(key) && typeof value === 'string' && value.length > 4 && markup.includes(value)) issues.push(`Generated HTML contains ${key}.`);
+    if (/(PASSWORD|SECRET|TOKEN|API_KEY|CONNECTION_STRING)/i.test(key) && typeof value === 'string' && value.length > 4 && markup.includes(value)) issues.push(`Generated HTML contains the value of ${key}; credentials must stay in the backend.`);
   }
-  if (!review) issues.push('Independent Gemini review result is missing or not valid JSON.');
-  else if (normalizeReviewStatus(review.status) === 'blocked') issues.push('Independent Gemini review did not approve the output.');
   return issues;
+}
+
+export function validateLiveReport(inventory, markup, review, env = {}) {
+  const issues = staticReportIssues(inventory, markup, env);
+  const status = normalizeReviewStatus(review?.status);
+  if (!review || status === 'missing') issues.push('Independent Gemini review result is missing, not valid JSON, or has no status.');
+  else if (status === 'blocked') issues.push('Independent Gemini review did not approve the output.');
+  return issues;
+}
+
+// Gemini authentication and network settings a user may have put in gemini/.env.
+// (Source credentials such as PG_* never reach the Gemini process.)
+const GEMINI_DOTENV_KEYS = ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_CLOUD_PROJECT', 'GOOGLE_CLOUD_LOCATION', 'GOOGLE_GENAI_USE_VERTEXAI', 'GOOGLE_APPLICATION_CREDENTIALS', 'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'https_proxy', 'http_proxy', 'no_proxy', 'NODE_EXTRA_CA_CERTS'];
+
+export function geminiEnvFromDotenv(env = {}) {
+  const result = {};
+  for (const key of GEMINI_DOTENV_KEYS) if (typeof env[key] === 'string' && env[key].trim() && process.env[key] === undefined) result[key] = env[key].trim();
+  return result;
 }
 
 // ---------- live narration of a Gemini phase ----------
@@ -398,7 +458,7 @@ async function runPhase([name, promptFile, expectedFile], ctx) {
   const expected = path.join(stage, expectedFile);
   const prompt = `Read ${promptFile}, work/live-run.json, work/report-digest.json, and work/inventory.json first. Follow the phase instructions exactly. Do not read .env or run shell commands. You MUST use the file-writing tool to write ${expectedFile}; do not merely print its contents in your response.`;
   const phaseStarted = Date.now();
-  const phaseDeadline = phaseStarted + settings.phaseMs;
+  let phaseDeadline = phaseStarted + settings.phaseMs;
   let result = null, missing = [], attempt = 0, flagRetries = 0, succeeded = false;
   log.info(name, `Starting (${promptFile}). Limits: ${formatDuration(settings.attemptMs)} per attempt, ${formatDuration(settings.idleMs)} without output, ${formatDuration(settings.phaseMs)} for the phase.`);
   while (attempt < settings.maxAttempts) {
@@ -407,23 +467,36 @@ async function runPhase([name, promptFile, expectedFile], ctx) {
     attempt++;
     if (fs.existsSync(expected)) fs.unlinkSync(expected);
     if (name === '02-build') {
-      for (const file of ['index.html', 'backend.mjs']) fs.rmSync(path.join(stage, 'output', 'dynamic', file), { force: true });
+      // A fresh build starts empty; a retry keeps what the previous attempt already wrote.
+      if (attempt === 1) for (const file of fs.readdirSync(path.join(stage, 'output', 'dynamic'))) fs.rmSync(path.join(stage, 'output', 'dynamic', file), { recursive: true, force: true });
     } else if (outputsEdited(name)) {
       for (const file of ['index.html', 'backend.mjs']) fs.copyFileSync(path.join(scope.dynamicDir, file), path.join(stage, 'output', 'dynamic', file));
     }
     // Quoted back to Gemini; characters cmd.exe treats specially are removed for the shim launcher.
     const lastProblem = result?.events?.filter(event => event.type === 'error' || (event.type === 'tool_result' && event.summary)).map(event => event.summary).at(-1)?.replace(/["%!&|<>()^\r\n]/g, ' ');
-    const repairInstruction = attempt > 1 && missing.length ? ` A previous attempt ended without producing these required files: ${missing.join(', ')}${lastProblem ? `; it ended with: ${lastProblem.slice(0, 200)}` : ''}. Do not repeat identical tool calls and do not switch to plan mode. Write every required file now with write_file.` : '';
+    const truncated = (result?.errorMessages ?? []).some(message => /MAX_TOKENS|token limit|maximum number of tokens|cut off/i.test(message));
+    const kept = name === '02-build' && attempt > 1 ? ['index.html', 'backend.mjs'].filter(file => fs.existsSync(path.join(stage, 'output', 'dynamic', file))).map(file => `output/dynamic/${file}`) : [];
+    const repairInstruction = attempt > 1 && missing.length ? ` A previous attempt ended without producing these required files: ${missing.join(', ')}${lastProblem ? `; it ended with: ${lastProblem.slice(0, 200)}` : ''}.${kept.length ? ` These files from that attempt are already written; keep them and edit them only if needed: ${kept.join(', ')}.` : ''}${truncated ? ' Your previous reply was cut off by the output token limit: write large files in parts (create the file with the first part using write_file, then add the remaining parts with replace).' : ''} Do not repeat identical tool calls and do not switch to plan mode. Write every required file now.` : '';
     const args = ['--model', MODEL, ...(cli.skipTrust ? ['--skip-trust'] : []), '-e', 'none', '--approval-mode', 'auto_edit', '--output-format', cli.outputFormat, '-p', prompt + repairInstruction];
     const label = `${name}.attempt-${attempt}`;
     log.info(name, `Attempt ${attempt} of ${settings.maxAttempts}: Gemini ${MODEL} running. Live transcript: ${rel(path.join(runDir, `${label}.events.jsonl`))}`);
     const narrator = createNarrator(name, settings);
     const attemptStarted = Date.now();
+    const debugLog = path.join(runDir, `${label}.gemini-debug.log`);
+    let networkFailures = 0;
     result = await runGeminiStream(args, {
       cwd: stage,
-      env: { GEMINI_DEBUG_LOG_FILE: path.join(runDir, `${label}.gemini-debug.log`) },
+      env: { ...geminiEnvFromDotenv(env), GEMINI_DEBUG_LOG_FILE: debugLog },
       timeoutMs: Math.min(settings.attemptMs, remainingMs),
-      idleTimeoutMs: settings.idleMs,
+      // The json fallback prints nothing until the end, so only the attempt limit applies to it.
+      idleTimeoutMs: cli.outputFormat === 'stream-json' ? settings.idleMs : 0,
+      // Three failed API attempts in a row for network reasons: stop instead of ~15 minutes of retries.
+      shouldAbort: line => {
+        if (!/^Attempt \d+ failed/.test(line)) return null;
+        if (!/fetch failed|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENETUNREACH|certificate|UNABLE_TO|SELF_SIGNED|socket hang up|proxy/i.test(line)) { networkFailures = 0; return null; }
+        return ++networkFailures >= 3 ? `Gemini CLI cannot reach the Gemini API: ${line.replace(/\s+/g, ' ').slice(0, 240)}` : null;
+      },
+      onPause: ms => { log.warn(name, `The PC was asleep or suspended for ${formatDuration(ms)}; the time limits were extended accordingly.`); },
       eventsFile: path.join(runDir, `${label}.events.jsonl`),
       stderrFile: path.join(runDir, `${label}.stderr.log`),
       onEvent: narrator.onEvent,
@@ -434,6 +507,8 @@ async function runPhase([name, promptFile, expectedFile], ctx) {
     });
     narrator.flush();
     collectClientErrorReports(attemptStarted, runDir, label);
+    try { result.debugTail = fs.readFileSync(debugLog, 'utf8').slice(-20000); } catch { /* no debug log written */ }
+    phaseDeadline += result.pausedMs ?? 0;
     log.info(name, `Attempt ${attempt} ended after ${formatDuration(result.durationMs)} (exit ${result.status ?? result.signal ?? 'none'}${result.error ? `: ${result.error.message}` : ''}).`);
 
     const flag = unsupportedFlag(result);
@@ -466,6 +541,7 @@ async function runPhase([name, promptFile, expectedFile], ctx) {
       const detail = result.interactivePrompt ? '' : ` ${geminiFailureDetail(result, env)}`;
       throw new ConversionError(`${name}: ${result.error?.message ?? `Gemini exited ${result.status}`}.${detail}`, { phase: name, hint: diagnosis.hint });
     }
+    if (attempt >= settings.maxAttempts) break;
     if (diagnosis.kind === 'quota') {
       const delayMs = geminiRetryDelayMs(result, attempt);
       if (Date.now() + delayMs >= phaseDeadline - 60_000) break;
@@ -625,6 +701,24 @@ export async function startServer(htmlFile, backend, inventory, { port = 8765, a
   return { server, url: `http://127.0.0.1:${bound}/`, port: bound };
 }
 
+// ---------- one conversion per scope ----------
+
+function processAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
+}
+
+// Two setup windows converting the same pages would overwrite each other's files.
+export function acquireScopeLock(scope) {
+  const lock = path.join(scope.workDir, 'converter.lock');
+  const existing = readJson(lock);
+  const fresh = existing?.startedAt && Date.now() - Date.parse(existing.startedAt) < 12 * 60 * 60 * 1000;
+  if (existing?.pid && existing.pid !== process.pid && fresh && processAlive(existing.pid)) {
+    throw new ConversionError(`Another converter window is already working on this scope (process ${existing.pid}, started ${existing.startedAt}).`, { phase: 'lock', hint: 'Finish or close the other PowerShell window (Ctrl+C), then rerun .\\setup.ps1. If no other window is open, delete ' + rel(lock) + '.' });
+  }
+  writeJson(lock, { pid: process.pid, startedAt: new Date().toISOString() });
+  process.on('exit', () => { try { if (readJson(lock)?.pid === process.pid) fs.rmSync(lock, { force: true }); } catch { /* best effort */ } });
+}
+
 // ---------- checkpoints ----------
 
 function recordPhase(state, name, paths, stateFile) {
@@ -666,8 +760,12 @@ export function scopedConnectors(digest) {
       found.set(match[1], list);
     }
   };
-  for (const table of digest.model?.tables ?? []) for (const partition of table.partitions ?? []) if (partition.type !== 'calculated') scan(partition.source, `table ${table.name}`);
-  for (const expression of digest.model?.expressions ?? []) scan(expression.expression, `query ${expression.name}`);
+  // Tables pulled in only by a relationship hop do not block: the selected visuals do not read them.
+  for (const table of digest.model?.tables ?? []) {
+    if (table.scope === 'related-by-relationship') continue;
+    for (const partition of table.partitions ?? []) if (partition.type !== 'calculated') scan(Array.isArray(partition.source) ? partition.source.join('\n') : partition.source, `table ${table.name}`);
+  }
+  for (const expression of digest.model?.expressions ?? []) scan(Array.isArray(expression.expression) ? expression.expression.join('\n') : expression.expression, `query ${expression.name}`);
   return [...found.entries()].map(([connector, where]) => ({ connector, usedBy: [...where] }));
 }
 
@@ -680,6 +778,11 @@ async function preflight(inventory, digest, env) {
   if (!hasAuth) log.warn('preflight', 'No Gemini sign-in was found (no GEMINI_API_KEY and no ~/.gemini credentials). If the first phase stops at a sign-in prompt, run gemini once in PowerShell to sign in.');
 
   const blocking = scopedConnectors(digest);
+  for (const table of (digest.model?.tables ?? []).filter(item => item.scope === 'related-by-relationship')) {
+    const text = (table.partitions ?? []).map(partition => Array.isArray(partition.source) ? partition.source.join('\n') : partition.source ?? '').join('\n');
+    const connector = /\b(Sql\.Databases?|Oracle\.Database|MySQL\.Database|Odbc\.\w+|OleDb\.\w+|Excel\.Workbook|SharePoint\.\w+|AnalysisServices\.\w+)\s*\(/.exec(text)?.[1];
+    if (connector) log.warn('preflight', `Table ${table.name} is related to the selected visuals but reads ${connector}, which cannot be read live; filters that flow through it may not be reproduced.`);
+  }
   if (blocking.length && env.HC_ALLOW_UNSUPPORTED_CONNECTORS !== 'true') {
     throw new ConversionError(`The selected pages need data from connector(s) this converter has no driver for: ${blocking.map(item => `${item.connector} (${item.usedBy.slice(0, 3).join(', ')})`).join('; ')}.`, { phase: 'preflight', hint: 'Only PostgreSQL and local/network CSV/JSON files can be read live. Choose pages that use those sources, or set HC_ALLOW_UNSUPPORTED_CONNECTORS=true in gemini/.env to build anyway with labeled placeholders.' });
   }
@@ -695,12 +798,20 @@ async function preflight(inventory, digest, env) {
     if (scopedFiles.size && ![...scopedFiles].some(file => item.referencedBy.startsWith(file))) continue;
     log.warn('preflight', `Cannot check ${item.connector}(${item.arguments}) in ${item.referencedBy} before the run: its target is computed. The generated backend's source healthcheck will test it.`);
   }
-  for (const source of inventory.postgresSources ?? []) {
+  // Only connections the selected pages read (per model file); a connection used elsewhere must not block.
+  const scopedPostgres = (inventory.postgresSources ?? []).filter(source => !scopedFiles.size || source.referencedBy.some(file => scopedFiles.has(file)));
+  for (const source of (inventory.postgresSources ?? []).filter(item => !scopedPostgres.includes(item))) log.info('preflight', `PostgreSQL ${source.server}/${source.database} is not used by the selected pages; not checked.`);
+  for (const source of scopedPostgres) {
     if (!env.PG_USER || !env.PG_PASSWORD) throw new ConversionError(`The report reads PostgreSQL ${source.server}/${source.database}, but PG_USER/PG_PASSWORD are empty.`, { phase: 'preflight', hint: `Open ${rel(path.join(root, '.env'))} and fill PG_USER and PG_PASSWORD with a read-only login, then rerun .\\setup.ps1.` });
     if (!fs.existsSync(path.join(root, 'node_modules', 'pg', 'package.json'))) throw new ConversionError('The PostgreSQL driver (pg) is not installed.', { phase: 'preflight', hint: 'Run npm install in the gemini folder (or rerun .\\setup.ps1 with Internet/npm access).' });
-    // Native SQL opt-in, positional parameters, and unparseable queries are policy checks, not connectivity.
-    try { listLiveSources({ postgresSources: [source] }, env); }
-    catch (error) { throw new ConversionError(`PostgreSQL ${source.server}/${source.database}: ${error.message}`, { phase: 'preflight', hint: `${postgresHint(error)} Nothing was sent to Gemini yet.` }); }
+    // Native SQL is opt-in even when the parser cannot read a query; parsed ones must have their $n values.
+    const unresolved = source.unresolvedNativeQueries ?? (source.hasUnresolvedNativeQuery ? 1 : 0);
+    if ((source.nativeQueries?.length || unresolved) && env.PG_ALLOW_NATIVE_QUERIES !== 'true') {
+      throw new ConversionError(`PostgreSQL ${source.server}/${source.database}: the report runs its own SQL (Value.NativeQuery), which needs your explicit approval.`, { phase: 'preflight', hint: `${postgresHint('PG_ALLOW_NATIVE_QUERIES')} Nothing was sent to Gemini yet.` });
+    }
+    if (unresolved) log.warn('preflight', `PostgreSQL ${source.server}/${source.database}: ${unresolved} native query(ies) could not be read by the scanner (computed SQL or parameters). Gemini will implement them from the M code; the backend check tests them.`);
+    try { listLiveSources({ postgresSources: [{ ...source, hasUnresolvedNativeQuery: false }] }, env); }
+    catch (error) { if (!/No supported PostgreSQL table/.test(error.message)) throw new ConversionError(`PostgreSQL ${source.server}/${source.database}: ${error.message}`, { phase: 'preflight', hint: `${postgresHint(error)} Nothing was sent to Gemini yet.` }); }
     if (env.HC_SKIP_SOURCE_PREFLIGHT === 'true') { log.warn('preflight', `Skipping PostgreSQL connection test for ${source.server}/${source.database} (HC_SKIP_SOURCE_PREFLIGHT=true).`); continue; }
     try {
       const info = await testPostgresConnection(source, env);
@@ -755,9 +866,11 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
     return { inventory, digest };
   }
   await preflight(inventory, digest, env);
+  acquireScopeLock(scope);
 
   const stateFile = path.join(scope.workDir, 'live-state.json');
-  const fingerprint = scopeFingerprint(inputFingerprint(inputDir), inventory);
+  const selectedIds = new Set(inventory.pages.map(page => page.id));
+  const fingerprint = scopeFingerprint(inputFingerprint(inputDir, (relative, isDirectory) => isDirectory ? stagedInputAllowed(relative) : stagedInputAllowed(relative) && reportPathIsInScope(`/${relative}`, selectedIds)), inventory);
   let state = readJson(stateFile);
   const hadState = state !== null;
   if (fresh || state?.version !== STATE_VERSION || state?.fingerprint !== fingerprint) {
@@ -797,16 +910,24 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
     };
     // A passing check is reused while backend.mjs is unchanged in this process.
     let lastCheck = null;
-    const backendHash = () => fs.existsSync(backendFile) ? createHash('sha256').update(fs.readFileSync(backendFile)).digest('hex') : null;
-    const ensureBackend = async reason => {
-      if (lastCheck?.ok && lastCheck.hash === backendHash() && (!lastCheck.placeholders.length || state.placeholderFixDone)) return lastCheck;
+    const outputsHash = () => createHash('sha256').update(fs.existsSync(backendFile) ? fs.readFileSync(backendFile) : '').update(fs.existsSync(htmlFile) ? fs.readFileSync(htmlFile) : '').digest('hex');
+    // coverage: also require every page/visual marker (after the batched page repairs have run).
+    const ensureBackend = async (reason, { coverage = false } = {}) => {
+      if (lastCheck?.ok && lastCheck.hash === outputsHash() && lastCheck.coverage === coverage && (!lastCheck.placeholders.length || state.placeholderFixDone)) return lastCheck;
       for (let round = 0; ; round++) {
-        log.info('self-check', `Checking the generated backend (${reason}): syntax, import, source healthcheck, and every data visual query...`);
+        log.info('self-check', `Checking the generated report (${reason}): HTML, backend syntax and import, source healthcheck, and every data visual query...`);
         const check = await selfCheckBackend(backendFile, inventory, env);
-        check.hash = backendHash();
+        const htmlIssues = staticReportIssues(inventory, fs.existsSync(htmlFile) ? fs.readFileSync(htmlFile, 'utf8') : '', env, { coverage }).map(message => ({ stage: 'html', message, kind: 'code' }));
+        check.issues.push(...htmlIssues);
+        check.ok = check.ok && !htmlIssues.length;
+        check.hash = outputsHash();
+        check.coverage = coverage;
         await closeBackend(lastCheck?.backend);
         lastCheck = check;
-        writeJson(path.join(scope.workDir, 'live-selfcheck.json'), { checkedAt: new Date().toISOString(), reason, ok: check.ok, issues: check.issues, placeholders: check.placeholders, visuals: check.visuals });
+        const selfcheckReport = { checkedAt: new Date().toISOString(), reason, ok: check.ok, issues: check.issues, placeholders: check.placeholders, suspicious: check.suspicious ?? [], visuals: check.visuals };
+        writeJson(path.join(scope.workDir, 'live-selfcheck.json'), selfcheckReport);
+        // Reviewers and fix phases read the real results from their workspace.
+        writeJson(path.join(stage, 'work', 'live-selfcheck.json'), selfcheckReport);
         const environment = check.issues.filter(issue => issue.kind === 'environment');
         const code = check.issues.filter(issue => issue.kind === 'code');
         log.info('self-check', `${check.visuals.length} visual query(ies) answered, ${check.placeholders.length} placeholder(s), ${code.length} code issue(s), ${environment.length} source-access issue(s).`);
@@ -870,8 +991,11 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
           const after = reportCoverage({ pages: [page] }, fs.readFileSync(htmlFile, 'utf8'))[0];
           const stillMissing = batch.filter(visual => after.missingVisuals.some(item => item.id === visual.id));
           const repair = readJson(persistedPath(scope, artifact));
-          if (repair && !/^complete/i.test(String(repair.status ?? ''))) log.warn(name, `Gemini reported status "${repair.status}": ${(repair.limitations ?? []).map(issueText).slice(0, 3).join('; ')}`);
+          if (repair && !/^complete/i.test(String(repair.status ?? ''))) log.warn(name, `Gemini reported status "${repair.status}": ${asArray(repair.limitations).map(issueText).slice(0, 3).join('; ')}`);
           if (after.missingPage || stillMissing.length) {
+            // Partial progress is progress: only a batch that added nothing counts as a failed attempt.
+            const progressed = stillMissing.length < batch.length || (current.missingPage && !after.missingPage);
+            if (progressed) { failures = 0; log.info(name, `${batch.length - stillMissing.length} of ${batch.length} visual(s) added; continuing with the rest.`); continue; }
             if (++failures >= 2) throw new ConversionError(`${name}: page "${page.name}" is still missing ${after.missingPage ? 'its page element and ' : ''}${stillMissing.length} visual element(s) after two repair attempts (${stillMissing.map(visual => visual.id).slice(0, 5).join(', ')}).`, { phase: name, hint: `Progress is saved; rerunning .\\setup.ps1 continues with this page. See ${rel(persistedPath(scope, artifact))}.` });
             log.warn(name, `${stillMissing.length} requested visual(s) are still missing from the HTML; retrying this batch once.`);
             continue;
@@ -881,9 +1005,9 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
           saveCheckpoint(stateFile, state);
         }
       }
-      let blockedRounds = 0;
+      let blockedRounds = 0, missingReviewRetried = false;
       for (;;) {
-        checked = await ensureBackend(state.needsFinalReview ? 'after repairs' : 'before serving');
+        checked = await ensureBackend(state.needsFinalReview ? 'after repairs' : 'before serving', { coverage: true });
         const finalValid = artifactsMatch(root, state.phases['05-final-review']?.artifacts);
         if (state.needsFinalReview || (Object.keys(state.repairs).length && !finalValid)) {
           await runPhase(['05-final-review', 'prompts/live-05-final-review.md', 'work/live-final-review.json'], ctx);
@@ -893,17 +1017,25 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
         }
         const review = currentReview(scope, state);
         const status = normalizeReviewStatus(review?.status);
+        if (status === 'missing' && !missingReviewRetried) {
+          missingReviewRetried = true;
+          log.warn('review', 'The review result has no status (or is not valid JSON); running the independent review again.');
+          state.needsFinalReview = true;
+          saveCheckpoint(stateFile, state);
+          continue;
+        }
+        if (status === 'missing') throw new ConversionError('The independent Gemini review twice produced no usable status.', { phase: 'review', hint: `Rerun .\\setup.ps1 to review again. The review files are in ${rel(scope.workDir)}.` });
         if (status !== 'blocked' || env.HC_ALLOW_BLOCKED_REVIEW === 'true') {
           if (status === 'blocked') log.warn('review', 'The review is blocked, but HC_ALLOW_BLOCKED_REVIEW=true: serving anyway.');
-          if (status === 'unknown' || status === 'missing') log.warn('review', `Review status "${review?.status}" is not pass/warnings/blocked; treating it as warnings.`);
+          if (status === 'unknown') log.warn('review', `Review status "${review?.status}" is not pass/warnings/blocked; treating it as warnings.`);
           break;
         }
         if (blockedRounds++ >= MAX_FIX_ROUNDS) {
-          const findings = (review.findings ?? []).map(issueText).slice(0, 5);
+          const findings = asArray(review.findings).map(issueText).slice(0, 5);
           throw new ConversionError(`The independent Gemini review still blocks the report after ${MAX_FIX_ROUNDS} fix round(s): ${findings.join(' | ') || 'no findings listed'}`, { phase: 'review', hint: `Read ${rel(path.join(scope.workDir, state.phases['05-final-review'] ? 'live-final-review.json' : 'live-review.json'))}. Rerun .\\setup.ps1 for another fix round, or set HC_ALLOW_BLOCKED_REVIEW=true in gemini/.env to open the report anyway for manual comparison.` });
         }
-        log.warn('review', `The independent review marked the report blocked (${(review.findings ?? []).length} finding(s)). Asking Gemini to fix them, then reviewing again.`);
-        await runFix({ reason: 'review-blocked', findings: review.findings ?? [], limitations: review.limitations ?? [], unverified: review.unverified ?? [] });
+        log.warn('review', `The independent review marked the report blocked (${asArray(review.findings).length} finding(s)). Asking Gemini to fix them, then reviewing again.`);
+        await runFix({ reason: 'review-blocked', findings: asArray(review.findings), limitations: asArray(review.limitations), unverified: asArray(review.unverified) });
         state.needsFinalReview = true;
         saveCheckpoint(stateFile, state);
       }
@@ -916,8 +1048,8 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
   if (issues.length) throw new ConversionError(`Generated report failed validation: ${issues.slice(0, 5).join(' ')}`, { phase: 'validation', hint: `Progress is saved. See ${rel(path.join(scope.workDir, 'live-validation.json'))}; rerunning .\\setup.ps1 retries the repairs.` });
   if (!checked.ok) throw new ConversionError(`Generated backend check failed: ${checked.issues.map(issue => issue.message.split('\n')[0]).slice(0, 3).join(' | ')}`, { phase: 'self-check', hint: `See ${rel(path.join(scope.workDir, 'live-selfcheck.json'))}.` });
   writeJson(path.join(scope.workDir, 'live-preflight.json'), { ok: true, sources: checked.health?.sources ?? [], visuals: checked.visuals, placeholders: checked.placeholders });
-  const limitations = Array.isArray(review.limitations) ? review.limitations : [];
-  const unverified = Array.isArray(review.unverified) ? review.unverified : [];
+  const limitations = asArray(review.limitations);
+  const unverified = asArray(review.unverified);
   log.info('review', `Gemini review: ${review.status}. ${limitations.length} limitation(s), ${unverified.length} unverified behavior(s).`);
   for (const placeholder of checked.placeholders) log.warn('review', `Visual ${placeholder.visualId} (${placeholder.type}${placeholder.title ? ` "${placeholder.title}"` : ''}) on "${placeholder.page}" is an explicit placeholder: ${placeholder.limitations.join('; ') || 'no reason given'}`);
   if (!serve) return { inventory, review, backend: checked.backend };
@@ -925,7 +1057,7 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
   const { server, url } = await startServer(htmlFile, checked.backend, inventory, { port: Number.isInteger(requestedPort) && requestedPort >= 0 ? requestedPort : 8765 });
   log.info(null, '============================================================');
   log.info(null, `REPORT READY: ${url}`);
-  log.info(null, `Generated file: ${htmlFile}`);
+  log.info(null, `Open the address above in the browser; the HTML file alone cannot load data. Files: ${scope.dynamicDir}`);
   log.info(null, 'Credentials stay in this local server. Press Ctrl+C in this window to stop it.');
   log.info(null, '============================================================');
   return { inventory, review, server, url };
@@ -946,7 +1078,18 @@ export function reportFailure(error) {
   log.error(error?.phase ?? null, '============================================================');
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+// Windows paths differ in case, 8.3 short names, or symlinks between argv and import.meta.url;
+// compare real paths case-insensitively so the converter never silently does nothing.
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  try {
+    const invoked = fs.realpathSync(path.resolve(process.argv[1]));
+    const self = fs.realpathSync(fileURLToPath(import.meta.url));
+    return process.platform === 'win32' ? invoked.toLowerCase() === self.toLowerCase() : invoked === self;
+  } catch { return import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href; }
+}
+
+if (isMainModule()) {
   const args = process.argv.slice(2);
   const portIndex = args.indexOf('--port');
   Promise.resolve().then(() => runLiveReport({

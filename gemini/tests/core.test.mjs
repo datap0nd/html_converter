@@ -289,7 +289,7 @@ test('live report validation requires generated visual coverage, a backend call,
   const valid = '<html><div id="report-status"></div><section data-page-id="page-a"><article data-visual-id="visual-a"></article></section><script>fetch("/api/report?visual=visual-a")</script></html>';
   assert.deepEqual(validateLiveReport(inventory, valid, review, { PG_PASSWORD: 'secret-password' }), []);
   assert.match(validateLiveReport(inventory, valid.replace('visual-a', 'missing'), review).join(' '), /Missing visual/);
-  assert.match(validateLiveReport(inventory, valid + 'secret-password', review, { PG_PASSWORD: 'secret-password' }).join(' '), /contains PG_PASSWORD/);
+  assert.match(validateLiveReport(inventory, valid + 'secret-password', review, { PG_PASSWORD: 'secret-password' }).join(' '), /contains the value of PG_PASSWORD/);
   assert.match(validateLiveReport(inventory, valid, { ...review, status: 'blocked' }).join(' '), /did not approve/);
 });
 

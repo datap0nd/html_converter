@@ -197,7 +197,11 @@ test('review status and coverage validation are tolerant of wording but strict o
   const html = "<html><div id='report-status'></div><section data-page-id='p'><div data-visual-id=\"v\"></div><div data-visual-id='t'></div></section><script>fetch('/api/report')</script></html>";
   assert.deepEqual(validateLiveReport(inventory, html, { status: 'warnings' }), []);
   assert.match(validateLiveReport(inventory, html.replace("data-visual-id='t'", ''), { status: 'warnings' }).join(' '), /Missing visual t/);
-  assert.match(validateLiveReport(inventory, html, null).join(' '), /missing or not valid JSON/);
+  assert.match(validateLiveReport(inventory, html, null).join(' '), /missing, not valid JSON/);
+  assert.match(validateLiveReport(inventory, html, {}).join(' '), /has no status/);
+  assert.equal(normalizeReviewStatus('warnings (non-blocking)'), 'warnings');
+  assert.equal(normalizeReviewStatus('not approved'), 'blocked');
+  assert.equal(normalizeReviewStatus('incomplete'), 'blocked');
 });
 
 test('printed JSON artifacts are recovered from prose and code fences', () => {
@@ -321,7 +325,7 @@ test('end to end: unreachable data stops before review, and the rerun resumes at
   const second = await runConverter(sandbox, { scenario: 'environment-issue' });
   assert.equal(second.code, 1);
   assert.deepEqual(second.calls, ['01', '02'], 'no Gemini phase is spent while the data source is unreachable');
-  assert.match(second.stdout, /Checking the generated backend \(saved build\)/);
+  assert.match(second.stdout, /Checking the generated report \(saved build\)/);
 }));
 
 test('end to end: missing CSV source fails in preflight before Gemini runs', withSandbox(async sandbox => {

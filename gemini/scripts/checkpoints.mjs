@@ -16,15 +16,17 @@ function fileHash(file) {
   return hash.digest('hex');
 }
 
-export function inputFingerprint(inputDir) {
+// include(relativePath) limits the hash to the files that matter, so Desktop-local files
+// (.pbi settings, caches, diagram layouts) or unselected pages do not discard progress.
+export function inputFingerprint(inputDir, include = () => true) {
   const files = [];
   function visit(dir) {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
       const file = path.join(dir, entry.name);
       const rel = path.relative(inputDir, file).replaceAll('\\', '/');
       if (entry.isSymbolicLink() || /^data(?:\/|$)/i.test(rel)) continue;
-      if (entry.isDirectory()) visit(file);
-      else if (entry.isFile() && /\.(?:pbip|pbir|tmdl|m|pq|bim|json)$/i.test(rel)) files.push([rel, fileHash(file)]);
+      if (entry.isDirectory()) { if (include(rel, true)) visit(file); }
+      else if (entry.isFile() && /\.(?:pbip|pbir|pbism|tmdl|m|pq|bim|json)$/i.test(rel) && include(rel, false)) files.push([rel, fileHash(file)]);
     }
   }
   visit(inputDir);
@@ -54,6 +56,15 @@ export function artifactsMatch(root, hashes) {
 export function saveCheckpoint(file, state) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const temp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(temp, JSON.stringify({ ...state, updatedAt: new Date().toISOString() }, null, 2) + '\n');
-  fs.renameSync(temp, file);
+  const text = JSON.stringify({ ...state, updatedAt: new Date().toISOString() }, null, 2) + '\n';
+  fs.writeFileSync(temp, text);
+  // Antivirus, OneDrive, or an open editor can briefly lock the file on Windows.
+  for (let attempt = 1; ; attempt++) {
+    try { fs.renameSync(temp, file); return; }
+    catch (error) {
+      if (!['EPERM', 'EBUSY', 'EACCES'].includes(error.code)) throw error;
+      if (attempt >= 20) { fs.writeFileSync(file, text); try { fs.rmSync(temp, { force: true }); } catch { /* best effort */ } return; }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100 * attempt);
+    }
+  }
 }

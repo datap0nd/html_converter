@@ -1,9 +1,12 @@
 # Source reports and exports can contain confidential data. Never commit them.
 input/**
 !input/.gitkeep
+output/**
+!output/dynamic/
+!output/static/
 output/dynamic/**
-!output/dynamic/.gitkeep
 output/static/**
+!output/dynamic/.gitkeep
 !output/static/.gitkeep
 work/**
 !work/.gitkeep
