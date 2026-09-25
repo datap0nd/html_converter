@@ -1,0 +1,9 @@
+createOrReplace
+
+	table Scratch
+		lineageTag: 0e6a8a4c-2862-4cc1-9e12-b091e0a2c92b
+
+		partition Scratch = m
+			mode: import
+			source = OData.Feed("https://services.odata.example/v4/Scratch")
+

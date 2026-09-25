@@ -1,0 +1,87 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.7.0/schema.json",
+  "name": "475528ad13c568d4ae4e",
+  "position": {
+    "x": 660,
+    "y": 20,
+    "z": 2000,
+    "height": 400,
+    "width": 600,
+    "tabOrder": 2000
+  },
+  "visual": {
+    "visualType": "tableEx",
+    "query": {
+      "queryState": {
+        "Values": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Stores EU"
+                    }
+                  },
+                  "Property": "Store"
+                }
+              },
+              "queryRef": "Stores EU.Store",
+              "nativeQueryRef": "Store"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Stores EU"
+                    }
+                  },
+                  "Property": "City"
+                }
+              },
+              "queryRef": "Stores EU.City",
+              "nativeQueryRef": "City"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Stores EU"
+                    }
+                  },
+                  "Property": "Country"
+                }
+              },
+              "queryRef": "Stores EU.Country",
+              "nativeQueryRef": "Country"
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Stores (semicolon CSV, cp1252)'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

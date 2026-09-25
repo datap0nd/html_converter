@@ -1,0 +1,4 @@
+ReturnDate	OrderID	Quantity	Reason
+2024-02-03	10004	1	Damaged
+2024-06-11	10017	2	Wrong size
+2025-01-20	10031	1	Changed mind

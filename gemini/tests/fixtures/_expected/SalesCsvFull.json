@@ -1,0 +1,224 @@
+{
+  "fixture": "SalesCsvFull",
+  "description": "3 pages (hidden tooltip page), CSV sources with absolute File.Contents paths, CALENDAR date table, report/page/visual filters, visual group.",
+  "pages": [
+    {
+      "id": "06ac133cdc7441821cad",
+      "name": "Sales Overview",
+      "hidden": false,
+      "visuals": [
+        {
+          "id": "867bbb262fcf56b6b1eb",
+          "type": "textbox",
+          "role": "decorative",
+          "title": null
+        },
+        {
+          "id": "594e1e4e0b10e3eb5f89",
+          "type": "image",
+          "role": "decorative",
+          "title": null
+        },
+        {
+          "id": "e6bc2ac377d0674f5dbb",
+          "type": "shape",
+          "role": "decorative",
+          "title": null
+        },
+        {
+          "id": "931ac464bda798d6c521",
+          "type": "visualGroup",
+          "role": "group",
+          "title": "KPI cards"
+        },
+        {
+          "id": "568b673c59bca76bf6bf",
+          "type": "card",
+          "role": "data",
+          "title": "Total Sales"
+        },
+        {
+          "id": "bfa8a6097e846ea72ede",
+          "type": "cardVisual",
+          "role": "data",
+          "title": "Margin and growth"
+        },
+        {
+          "id": "5daaa71ed5a0c9d010cb",
+          "type": "card",
+          "role": "data",
+          "title": "Orders"
+        },
+        {
+          "id": "1107515c3289402ba465",
+          "type": "clusteredColumnChart",
+          "role": "data",
+          "title": "Sales by category"
+        },
+        {
+          "id": "c1461112e43c81ba747a",
+          "type": "lineChart",
+          "role": "data",
+          "title": "Monthly sales vs last year"
+        },
+        {
+          "id": "416ddf0c5e3b16cbd12d",
+          "type": "donutChart",
+          "role": "data",
+          "title": "Sales by channel"
+        },
+        {
+          "id": "83d75e060c1879522a11",
+          "type": "slicer",
+          "role": "data",
+          "title": "Category"
+        },
+        {
+          "id": "d0641f8fbdf1ee7529c0",
+          "type": "slicer",
+          "role": "data",
+          "title": "Order date"
+        },
+        {
+          "id": "3a0f58f04735b9c56606",
+          "type": "actionButton",
+          "role": "decorative",
+          "title": null
+        }
+      ]
+    },
+    {
+      "id": "8f24fddaf545ef5e59c5",
+      "name": "Product Detail",
+      "hidden": false,
+      "visuals": [
+        {
+          "id": "519148d88a27786a6d1f",
+          "type": "textbox",
+          "role": "decorative",
+          "title": null
+        },
+        {
+          "id": "b5459f87d01c4be39f5d",
+          "type": "tableEx",
+          "role": "data",
+          "title": "Top 5 products"
+        },
+        {
+          "id": "21ab10e564cf7efbde1e",
+          "type": "pivotTable",
+          "role": "data",
+          "title": "Category x year"
+        },
+        {
+          "id": "064fb9942f29b624c806",
+          "type": "actionButton",
+          "role": "decorative",
+          "title": null
+        }
+      ]
+    },
+    {
+      "id": "deca0623f7ef3d0efae2",
+      "name": "Category Tooltip",
+      "hidden": true,
+      "visuals": [
+        {
+          "id": "bec53002685d169e4c20",
+          "type": "card",
+          "role": "data",
+          "title": "Margin %"
+        },
+        {
+          "id": "cf8ad297e3134916d979",
+          "type": "clusteredBarChart",
+          "role": "data",
+          "title": "Products in category"
+        }
+      ]
+    }
+  ],
+  "directCsvSources": [
+    "sales.csv",
+    "products.csv"
+  ],
+  "postgresSources": [],
+  "unsupportedConnectors": [],
+  "reportModelReference": "local-path",
+  "filters": {
+    "report": 1,
+    "pages": {
+      "06ac133cdc7441821cad": 1,
+      "8f24fddaf545ef5e59c5": 1,
+      "deca0623f7ef3d0efae2": 1
+    }
+  },
+  "model": {
+    "tables": [
+      "Sales",
+      "Product",
+      "Date"
+    ],
+    "measures": 10,
+    "relationships": 2,
+    "calculatedColumns": [
+      "Sales.Line Total",
+      "Date.Year",
+      "Date.Month Number",
+      "Date.Month",
+      "Date.Year Month"
+    ],
+    "hiddenColumns": [
+      "Sales.ProductKey",
+      "Date.Month Number"
+    ]
+  },
+  "shouldPassPreflight": true,
+  "files": [
+    ".gitignore",
+    "SalesCsv.Report/.pbi/localSettings.json",
+    "SalesCsv.Report/.platform",
+    "SalesCsv.Report/StaticResources/RegisteredResources/logo_generic359891629658.png",
+    "SalesCsv.Report/StaticResources/SharedResources/BaseThemes/CY26SU05.json",
+    "SalesCsv.Report/definition.pbir",
+    "SalesCsv.Report/definition/pages/06ac133cdc7441821cad/page.json",
+    "SalesCsv.Report/definition/pages/06ac133cdc7441821cad/visuals/1107515c3289402ba465/visual.json",
+    "SalesCsv.Report/definition/pages/06ac133cdc7441821cad/visuals/3a0f58f04735b9c56606/visual.json",
+    "SalesCsv.Report/definition/pages/06ac133cdc7441821cad/visuals/416ddf0c5e3b16cbd12d/visual.json",
+    "SalesCsv.Report/definition/pages/06ac133cdc7441821cad/visuals/568b673c59bca76bf6bf/visual.json",
+    "SalesCsv.Report/definition/pages/06ac133cdc7441821cad/visuals/594e1e4e0b10e3eb5f89/visual.json",
+    "SalesCsv.Report/definition/pages/06ac133cdc7441821cad/visuals/5daaa71ed5a0c9d010cb/visual.json",
+    "SalesCsv.Report/definition/pages/06ac133cdc7441821cad/visuals/83d75e060c1879522a11/visual.json",
+    "SalesCsv.Report/definition/pages/06ac133cdc7441821cad/visuals/867bbb262fcf56b6b1eb/visual.json",
+    "SalesCsv.Report/definition/pages/06ac133cdc7441821cad/visuals/931ac464bda798d6c521/visual.json",
+    "SalesCsv.Report/definition/pages/06ac133cdc7441821cad/visuals/bfa8a6097e846ea72ede/visual.json",
+    "SalesCsv.Report/definition/pages/06ac133cdc7441821cad/visuals/c1461112e43c81ba747a/visual.json",
+    "SalesCsv.Report/definition/pages/06ac133cdc7441821cad/visuals/d0641f8fbdf1ee7529c0/visual.json",
+    "SalesCsv.Report/definition/pages/06ac133cdc7441821cad/visuals/e6bc2ac377d0674f5dbb/visual.json",
+    "SalesCsv.Report/definition/pages/8f24fddaf545ef5e59c5/page.json",
+    "SalesCsv.Report/definition/pages/8f24fddaf545ef5e59c5/visuals/064fb9942f29b624c806/visual.json",
+    "SalesCsv.Report/definition/pages/8f24fddaf545ef5e59c5/visuals/21ab10e564cf7efbde1e/visual.json",
+    "SalesCsv.Report/definition/pages/8f24fddaf545ef5e59c5/visuals/519148d88a27786a6d1f/visual.json",
+    "SalesCsv.Report/definition/pages/8f24fddaf545ef5e59c5/visuals/b5459f87d01c4be39f5d/visual.json",
+    "SalesCsv.Report/definition/pages/deca0623f7ef3d0efae2/page.json",
+    "SalesCsv.Report/definition/pages/deca0623f7ef3d0efae2/visuals/bec53002685d169e4c20/visual.json",
+    "SalesCsv.Report/definition/pages/deca0623f7ef3d0efae2/visuals/cf8ad297e3134916d979/visual.json",
+    "SalesCsv.Report/definition/pages/pages.json",
+    "SalesCsv.Report/definition/report.json",
+    "SalesCsv.Report/definition/version.json",
+    "SalesCsv.SemanticModel/.pbi/cache.abf",
+    "SalesCsv.SemanticModel/.pbi/editorSettings.json",
+    "SalesCsv.SemanticModel/.pbi/localSettings.json",
+    "SalesCsv.SemanticModel/.platform",
+    "SalesCsv.SemanticModel/definition.pbism",
+    "SalesCsv.SemanticModel/definition/cultures/en-US.tmdl",
+    "SalesCsv.SemanticModel/definition/database.tmdl",
+    "SalesCsv.SemanticModel/definition/model.tmdl",
+    "SalesCsv.SemanticModel/definition/relationships.tmdl",
+    "SalesCsv.SemanticModel/definition/tables/Date.tmdl",
+    "SalesCsv.SemanticModel/definition/tables/Product.tmdl",
+    "SalesCsv.SemanticModel/definition/tables/Sales.tmdl",
+    "SalesCsv.SemanticModel/diagramLayout.json",
+    "SalesCsv.pbip"
+  ]
+}

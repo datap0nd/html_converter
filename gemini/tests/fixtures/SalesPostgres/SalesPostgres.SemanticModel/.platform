@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "SemanticModel",
+    "displayName": "SalesPostgres"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "d4aea4b0-aca4-448f-b885-ae3ab3041ce9"
+  }
+}

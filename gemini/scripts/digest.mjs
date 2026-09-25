@@ -1,7 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { root as defaultRoot, inputDir as defaultInputDir, walk, relative, readJson } from './core.mjs';
-import { literalText, describeField, visualTitle, visualProjections, classifyVisual, visualType } from './pbir.mjs';
+import { literalText, describeField, visualTitle, visualProjections, classifyVisual, visualType, formattingFields } from './pbir.mjs';
+import { parseTmdl, parseTmdlName, parseQualifiedColumn } from './tmdl.mjs';
+
+export { parseTmdl, parseTmdlName, parseQualifiedColumn };
 
 export { literalText, describeField, visualTitle, visualProjections, classifyVisual };
 
@@ -59,6 +62,7 @@ export function visualDigest(json, meta = {}) {
     ...(json?.isHidden ? { hidden: true } : {}),
     ...(json?.visualGroup ? { group: { displayName: json.visualGroup.displayName ?? null, mode: json.visualGroup.groupMode ?? null } } : {}),
     fields: visualProjections(json),
+    ...(formattingFields(json).length ? { formattingFields: formattingFields(json) } : {}),
     ...(sortDigest(json) ? { sort: sortDigest(json) } : {}),
     filters: filterDigest(json?.filterConfig?.filters),
     ...(slicerSelection ? { savedSlicerSelection: compact(slicerSelection) } : {}),
@@ -69,141 +73,24 @@ export function visualDigest(json, meta = {}) {
   };
 }
 
-// ---------- TMDL ----------
-
-function lineIndent(line) {
-  let depth = 0, index = 0;
-  while (index < line.length) {
-    if (line[index] === '\t') { depth++; index++; }
-    else if (line.startsWith('    ', index)) { depth++; index += 4; }
-    else break;
-  }
-  return { depth, rest: line.slice(index) };
-}
-
-const DECLARATIONS = new Set(['model', 'database', 'table', 'column', 'measure', 'partition', 'hierarchy', 'level', 'relationship', 'expression', 'calculationGroup', 'calculationItem', 'annotation', 'extendedProperty', 'variation', 'perspective', 'perspectiveTable', 'perspectiveColumn', 'perspectiveMeasure', 'perspectiveHierarchy', 'role', 'tablePermission', 'columnPermission', 'culture', 'linguisticMetadata', 'dataSource', 'queryGroup', 'formatStringDefinition', 'detailRowsDefinition', 'changedProperty', 'dataAccessOptions', 'function', 'calendar', 'alternateOf', 'refreshPolicy']);
-
-export function parseTmdlName(text) {
-  const source = text.trimStart();
-  if (source.startsWith("'")) {
-    let index = 1, name = '';
-    while (index < source.length) {
-      if (source[index] === "'") {
-        if (source[index + 1] === "'") { name += "'"; index += 2; continue; }
-        index++;
-        break;
-      }
-      name += source[index++];
-    }
-    return { name, rest: source.slice(index) };
-  }
-  const match = /^([^\s=:]+)([\s\S]*)$/.exec(source);
-  return match ? { name: match[1], rest: match[2] } : { name: '', rest: '' };
-}
-
-export function parseQualifiedColumn(text) {
-  const first = parseTmdlName(text ?? '');
-  const rest = first.rest.trimStart();
-  if (rest.startsWith('.')) return { table: first.name, column: parseTmdlName(rest.slice(1)).name };
-  // Unquoted Table.Column is a single token.
-  const dot = first.name.indexOf('.');
-  if (dot > 0) return { table: first.name.slice(0, dot), column: first.name.slice(dot + 1) };
-  return { table: null, column: first.name };
-}
-
-export function parseTmdl(text) {
-  const lines = String(text ?? '').replace(/^﻿/, '').split(/\r?\n/);
-  let cursor = 0;
-
-  function dedent(block) {
-    while (block.length && !block[block.length - 1].trim()) block.pop();
-    while (block.length && !block[0].trim()) block.shift();
-    const depths = block.filter(line => line.trim()).map(line => lineIndent(line).depth);
-    const min = depths.length ? Math.min(...depths) : 0;
-    return block.map(line => {
-      let result = line;
-      for (let level = 0; level < min; level++) result = result.startsWith('\t') ? result.slice(1) : result.startsWith('    ') ? result.slice(4) : result;
-      return result;
-    }).join('\n');
-  }
-
-  function readExpression(depth, first) {
-    const inline = first.trim();
-    if (inline.startsWith('```')) {
-      const block = [inline.slice(3)];
-      while (cursor < lines.length) {
-        const line = lines[cursor++];
-        const end = line.indexOf('```');
-        if (end >= 0) { block.push(line.slice(0, end)); break; }
-        block.push(line);
-      }
-      return dedent(block);
-    }
-    const block = inline ? [] : [];
-    while (cursor < lines.length) {
-      const line = lines[cursor];
-      if (line.trim() && lineIndent(line).depth < depth + 2) break;
-      block.push(line);
-      cursor++;
-    }
-    const continuation = dedent(block);
-    return inline ? (continuation ? `${inline}\n${continuation}` : inline) : continuation;
-  }
-
-  function parseBlock(depth) {
-    const nodes = [], props = {};
-    let description = [];
-    while (cursor < lines.length) {
-      const line = lines[cursor];
-      if (!line.trim()) { cursor++; continue; }
-      const { depth: current, rest } = lineIndent(line);
-      if (current < depth) break;
-      if (current > depth) { cursor++; continue; }
-      if (rest.startsWith('///')) { description.push(rest.slice(3).trim()); cursor++; continue; }
-      const declaration = /^(ref\s+)?([A-Za-z][A-Za-z0-9]*)\s+(.+)$/.exec(rest);
-      if (declaration && DECLARATIONS.has(declaration[2]) && !/^\s*:/.test(declaration[3])) {
-        cursor++;
-        const { name, rest: after } = parseTmdlName(declaration[3]);
-        const node = { kind: declaration[2], name, props: {}, children: [] };
-        if (declaration[1]) node.ref = true;
-        if (description.length) node.description = description.join('\n');
-        description = [];
-        const assignment = /^\s*=([\s\S]*)$/.exec(after);
-        if (assignment) node.value = readExpression(current, assignment[1]);
-        const body = parseBlock(current + 1);
-        node.props = body.props;
-        node.children = body.nodes;
-        nodes.push(node);
-        continue;
-      }
-      description = [];
-      const property = /^([A-Za-z][A-Za-z0-9]*)\s*(:|=)\s*([\s\S]*)$/.exec(rest);
-      cursor++;
-      if (!property) continue;
-      props[property[1]] = property[2] === '=' ? readExpression(current, property[3]) : property[3].trim();
-      if (property[2] === ':' && !property[3].trim()) {
-        // A property whose value continues on deeper lines (rare, e.g. JSON).
-        const extra = readExpression(current, '');
-        if (extra) props[property[1]] = extra;
-      }
-    }
-    return { nodes, props };
-  }
-
-  const result = [];
-  while (cursor < lines.length) {
-    const before = cursor;
-    result.push(...parseBlock(0).nodes);
-    if (cursor === before) cursor++;
-  }
-  return result;
+function tmdlMeasure(child) {
+  const formatDefinition = child.children.find(x => x.kind === 'formatStringDefinition');
+  return {
+    name: child.name,
+    expression: child.value ?? '',
+    ...(child.props.formatString ? { formatString: child.props.formatString } : {}),
+    ...(formatDefinition?.value ? { formatStringExpression: formatDefinition.value } : {}),
+    ...(child.props.displayFolder ? { displayFolder: child.props.displayFolder } : {}),
+    ...(child.props.isHidden ? { hidden: true } : {}),
+    ...(child.description ? { description: child.description } : {})
+  };
 }
 
 function tmdlTable(node, file) {
   const table = { name: node.name, source: file, columns: [], measures: [], partitions: [], hierarchies: [] };
   if (node.description) table.description = node.description;
-  if (node.props.isHidden !== undefined) table.hidden = true;
-  if (node.kind === 'calculationGroup') table.calculationGroup = true;
+  if (node.props.isHidden) table.hidden = true;
+  if (node.props.showAsVariationsOnly) table.autoDateTable = true;
   for (const child of node.children) {
     if (child.kind === 'column') {
       table.columns.push({
@@ -214,23 +101,17 @@ function tmdlTable(node, file) {
         ...(child.props.formatString ? { formatString: child.props.formatString } : {}),
         ...(child.props.summarizeBy ? { summarizeBy: child.props.summarizeBy } : {}),
         ...(child.props.sortByColumn ? { sortByColumn: child.props.sortByColumn } : {}),
-        ...(child.props.isHidden !== undefined ? { hidden: true } : {})
+        ...(child.props.isHidden ? { hidden: true } : {}),
+        ...(child.props.isKey ? { key: true } : {})
       });
     } else if (child.kind === 'measure') {
-      table.measures.push({
-        name: child.name,
-        expression: child.value ?? '',
-        ...(child.props.formatString ? { formatString: child.props.formatString } : {}),
-        ...(child.children.find(x => x.kind === 'formatStringDefinition') ? { formatStringExpression: child.children.find(x => x.kind === 'formatStringDefinition').value } : {}),
-        ...(child.props.displayFolder ? { displayFolder: child.props.displayFolder } : {}),
-        ...(child.description ? { description: child.description } : {})
-      });
+      table.measures.push(tmdlMeasure(child));
     } else if (child.kind === 'partition') {
       table.partitions.push({ name: child.name, type: (child.value ?? '').trim() || null, mode: child.props.mode ?? null, source: child.props.source ?? child.props.expression ?? child.props.query ?? null, ...(child.props.expressionSource ? { expressionSource: child.props.expressionSource } : {}) });
     } else if (child.kind === 'hierarchy') {
       table.hierarchies.push({ name: child.name, levels: child.children.filter(x => x.kind === 'level').map(level => ({ name: level.name, column: level.props.column ?? null })) });
-    } else if (child.kind === 'calculationItem') {
-      table.measures.push({ name: child.name, expression: child.value ?? '', calculationItem: true });
+    } else if (child.kind === 'calculationGroup') {
+      table.calculationGroup = { precedence: child.props.precedence ? Number(child.props.precedence) : null, items: child.children.filter(x => x.kind === 'calculationItem').map(item => ({ name: item.name, expression: item.value ?? '', ...(item.props.ordinal ? { ordinal: Number(item.props.ordinal) } : {}), ...(item.children.find(x => x.kind === 'formatStringDefinition')?.value ? { formatStringExpression: item.children.find(x => x.kind === 'formatStringDefinition').value } : {}) })) };
     }
   }
   return table;
@@ -265,7 +146,9 @@ function bimModel(json, file) {
     columns: (table.columns ?? []).map(column => ({ name: column.name, ...(column.expression ? { expression: bimText(column.expression) } : {}), ...(column.dataType ? { dataType: column.dataType } : {}), ...(column.sourceColumn ? { sourceColumn: column.sourceColumn } : {}), ...(column.formatString ? { formatString: column.formatString } : {}) })),
     measures: (table.measures ?? []).map(measure => ({ name: measure.name, expression: bimText(measure.expression) ?? '', ...(measure.formatString ? { formatString: measure.formatString } : {}) })),
     partitions: (table.partitions ?? []).map(partition => ({ name: partition.name, type: partition.source?.type ?? null, mode: partition.mode ?? null, source: bimText(partition.source?.expression ?? partition.source?.query) })),
-    hierarchies: (table.hierarchies ?? []).map(hierarchy => ({ name: hierarchy.name, levels: (hierarchy.levels ?? []).map(level => ({ name: level.name, column: level.column })) }))
+    hierarchies: (table.hierarchies ?? []).map(hierarchy => ({ name: hierarchy.name, levels: (hierarchy.levels ?? []).map(level => ({ name: level.name, column: level.column })) })),
+    ...(table.isHidden ? { hidden: true } : {}),
+    ...(table.calculationGroup ? { calculationGroup: { precedence: table.calculationGroup.precedence ?? null, items: (table.calculationGroup.calculationItems ?? []).map(item => ({ name: item.name, expression: bimText(item.expression) ?? '', ...(item.ordinal !== undefined ? { ordinal: item.ordinal } : {}) })) } } : {})
   }));
   const relationships = (model.relationships ?? []).map(item => ({ name: item.name, source: file, fromTable: item.fromTable, fromColumn: item.fromColumn, toTable: item.toTable, toColumn: item.toColumn, crossFilteringBehavior: item.crossFilteringBehavior ?? 'oneDirection', active: item.isActive !== false }));
   const expressions = (model.expressions ?? []).map(item => ({ name: item.name, kind: item.kind ?? 'm', expression: bimText(item.expression) ?? '', source: file }));
@@ -279,9 +162,13 @@ export function isModelDefinitionFile(file) {
 }
 
 export function loadSemanticModel(files, rootDir = defaultRoot) {
-  const model = { format: null, tables: [], relationships: [], expressions: [], parseErrors: [] };
+  const model = { format: null, tables: [], relationships: [], expressions: [], parseErrors: [], ignored: [] };
   const rel = file => path.relative(rootDir, file).replaceAll('\\', '/');
-  for (const file of files.filter(isModelDefinitionFile)) {
+  const definitions = files.filter(isModelDefinitionFile);
+  // A TMDL definition folder is authoritative; a leftover model.bim beside it would duplicate every table.
+  const hasTmdl = definitions.some(file => /\.tmdl$/i.test(file));
+  for (const file of definitions) {
+    if (hasTmdl && /\.bim$/i.test(file)) { model.ignored.push(rel(file)); continue; }
     try {
       if (/\.bim$/i.test(file)) {
         const json = readJson(file);
@@ -325,30 +212,45 @@ function stripDax(text) {
 
 export function daxReferences(expression, tableNames = []) {
   const text = stripDax(expression);
-  const qualified = [], unqualified = [], tables = new Set();
-  for (const match of text.matchAll(/\[([^\]]+)\]/g)) {
-    let index = match.index - 1;
-    while (index >= 0 && text[index] === ' ') index--;
-    if (index >= 0 && text[index] === "'") {
-      const start = text.lastIndexOf("'", index - 1);
-      if (start >= 0) {
-        const table = text.slice(start + 1, index).replaceAll("''", "'");
-        qualified.push({ table, name: match[1] });
-        tables.add(table);
-        continue;
+  const qualified = [], unqualified = [], tables = new Set(), words = [];
+  const known = new Map(tableNames.map(name => [name.toLowerCase(), name]));
+  const skipSpaces = index => { while (index < text.length && (text[index] === ' ' || text[index] === '\t')) index++; return index; };
+  const readBracket = index => { const end = text.indexOf(']', index + 1); return end < 0 ? null : { name: text.slice(index + 1, end), next: end + 1 }; };
+  for (let index = 0; index < text.length;) {
+    const c = text[index];
+    if (c === "'") {
+      let end = index + 1, name = '';
+      while (end < text.length) {
+        if (text[end] === "'" && text[end + 1] === "'") { name += "'"; end += 2; continue; }
+        if (text[end] === "'") break;
+        name += text[end++];
       }
+      const after = skipSpaces(end + 1);
+      if (text[after] === '[') { const bracket = readBracket(after); if (bracket) { qualified.push({ table: name, name: bracket.name }); index = bracket.next; } else index = after + 1; }
+      else index = end + 1;
+      tables.add(known.get(name.toLowerCase()) ?? name);
+      continue;
     }
-    const word = /([A-Za-z_][A-Za-z0-9_]*)$/.exec(text.slice(0, index + 1));
-    if (word && index >= 0 && /[A-Za-z0-9_]/.test(text[index])) {
-      qualified.push({ table: word[1], name: match[1] });
-      tables.add(word[1]);
-    } else unqualified.push(match[1]);
-  }
-  const lower = text.toLowerCase();
-  const bare = text.replace(/\[[^\]]*\]/g, '[]').replace(/'(?:[^']|'')*'/g, "''");
-  for (const name of tableNames) {
-    if (lower.includes(`'${name.toLowerCase().replaceAll("'", "''")}'`)) tables.add(name);
-    else if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && new RegExp(`(^|[^A-Za-z0-9_'\\[.])${name}(?![A-Za-z0-9_\\[])(?!\\s*\\()`, 'i').test(bare)) tables.add(name);
+    if (c === '[') {
+      const bracket = readBracket(index);
+      if (!bracket) break;
+      unqualified.push(bracket.name);
+      index = bracket.next;
+      continue;
+    }
+    if (/[A-Za-z_]/.test(c) && (index === 0 || !/[A-Za-z0-9_.]/.test(text[index - 1]))) {
+      const word = /^[A-Za-z_][A-Za-z0-9_\-]*/.exec(text.slice(index))[0];
+      const after = skipSpaces(index + word.length);
+      if (text[after] === '[') {
+        const bracket = readBracket(after);
+        if (bracket) { qualified.push({ table: word, name: bracket.name }); tables.add(known.get(word.toLowerCase()) ?? word); index = bracket.next; continue; }
+      }
+      if (text[after] !== '(' && known.has(word.toLowerCase())) tables.add(known.get(word.toLowerCase()));
+      words.push(word);
+      index += word.length;
+      continue;
+    }
+    index++;
   }
   return { qualified, unqualified, tables: [...tables] };
 }
@@ -377,6 +279,13 @@ function fieldsOf(value, into) {
   if (value.kind && (value.table || value.name)) into.push(value);
   for (const item of Object.values(value)) if (item && typeof item === 'object') fieldsOf(item, into);
   return into;
+}
+
+function findReportExtensions(inventory, rootDir) {
+  const pbir = inventory.reportDefinitions?.[0];
+  if (!pbir) return null;
+  const file = path.join(rootDir, path.dirname(pbir), 'definition', 'reportExtensions.json');
+  return fs.existsSync(file) ? { file, json: readJson(file) } : null;
 }
 
 function findReportJson(inventory, rootDir) {
@@ -431,7 +340,7 @@ export function scopeModel(model, seeds) {
         else scanM(partition.source);
         if (partition.expressionSource) addExpression(literalQuoted(partition.expressionSource));
       }
-      for (const measure of next.table.measures.filter(m => m.calculationItem)) scanDax(measure.expression);
+      for (const item of next.table.calculationGroup?.items ?? []) scanDax(item.expression);
     }
   }
   // One relationship hop keeps bridge/dimension tables needed for filter propagation.
@@ -457,8 +366,8 @@ export function scopeModel(model, seeds) {
   const tablesOut = model.tables.filter(table => included.has(table.name)).map(table => ({
     ...table,
     scope: direct.has(table.name) ? 'referenced' : 'related-by-relationship',
-    measures: table.measures.filter(measure => measure.calculationItem || measureIds.has(`${table.name}\u0000${measure.name}`)),
-    omittedMeasureCount: table.measures.filter(measure => !measure.calculationItem && !measureIds.has(`${table.name}\u0000${measure.name}`)).length
+    measures: table.measures.filter(measure => measureIds.has(`${table.name}\u0000${measure.name}`)),
+    omittedMeasureCount: table.measures.filter(measure => !measureIds.has(`${table.name}\u0000${measure.name}`)).length
   }));
   for (const table of model.tables) {
     if (included.has(table.name)) continue;
@@ -494,11 +403,19 @@ export function buildReportDigest(inventory, { rootDir = defaultRoot, inputDir =
     };
   });
   const report = findReportJson(inventory, rootDir);
+  const extensions = findReportExtensions(inventory, rootDir);
   const reportFilters = filterDigest(report?.json?.filterConfig?.filters);
   const seeds = fieldsOf([pages, reportFilters], []);
   const files = walk(inputDir);
   const model = loadSemanticModel(files, rootDir);
   if (!model.format) warnings.push('No TMDL or model.bim semantic model definition found under input/.');
+  if (model.ignored.length) warnings.push(`Ignored ${model.ignored.join(', ')} because the TMDL definition folder is authoritative.`);
+  // Report-level measures (reportExtensions.json) behave like model measures on their entity.
+  for (const entity of extensions?.json?.entities ?? []) {
+    let table = model.tables.find(item => item.name.toLowerCase() === String(entity.name ?? '').toLowerCase());
+    if (!table) { table = { name: entity.name, source: relative(extensions.file), columns: [], measures: [], partitions: [], hierarchies: [], reportLevelOnly: true }; model.tables.push(table); }
+    for (const measure of entity.measures ?? []) table.measures.push({ name: measure.name, expression: typeof measure.expression === 'string' ? measure.expression : JSON.stringify(measure.expression ?? ''), ...(measure.formatString ? { formatString: measure.formatString } : {}), reportLevel: true, source: relative(extensions.file) });
+  }
   warnings.push(...model.parseErrors.map(error => `Model parse issue (read the file directly): ${error}`));
   const scoped = scopeModel(model, seeds);
   const knownTables = new Set(model.tables.map(table => table.name.toLowerCase()));
@@ -528,6 +445,10 @@ export function buildReportDigest(inventory, { rootDir = defaultRoot, inputDir =
     sources: {
       postgres: inventory.postgresSources ?? [],
       directCsv: (inventory.directCsvSources ?? []).map(({ path: file, referencedBy, available, error }) => ({ path: file, referencedBy, available, ...(error ? { error } : {}) })),
+      // Every File.Contents target; csvOptions mirror Csv.Document (read with helpers.core.readCsvFile).
+      files: (inventory.fileSources ?? []).map(({ path: file, referencedBy, reader, available, error, csvOptions }) => ({ path: file, referencedBy, reader, available, ...(error ? { error } : {}), ...(csvOptions ? { csvOptions } : {}) })),
+      mParameters: inventory.mParameters ?? {},
+      unresolved: inventory.unresolvedSources ?? [],
       otherConnectors: inventory.unsupportedConnectors ?? []
     },
     warnings

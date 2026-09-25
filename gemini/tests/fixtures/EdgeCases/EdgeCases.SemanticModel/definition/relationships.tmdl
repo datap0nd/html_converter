@@ -1,0 +1,15 @@
+relationship 18ea6910-4654-441a-8c5a-6b40b98f0bf6
+	joinOnDateBehavior: datePartOnly
+	fromColumn: 'Fact Sales'.'Order Date'
+	toColumn: LocalDateTable_5cb33fe7-583b-4a68-924e-fc66e315fc0e.Date
+
+relationship a97ebd5a-b917-46e4-8187-7e99a3d7520c
+	crossFilteringBehavior: bothDirections
+	fromColumn: 'Fact Sales'.'Region Code'
+	toColumn: 'Customer''s Region'.'Region Code'
+
+relationship 55d010cc-e551-43b0-959d-8106ed64f20c
+	isActive: false
+	fromColumn: 'Manual Targets'.'Region Code'
+	toColumn: 'Customer''s Region'.'Region Code'
+

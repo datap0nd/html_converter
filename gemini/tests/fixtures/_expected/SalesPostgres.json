@@ -1,0 +1,145 @@
+{
+  "fixture": "SalesPostgres",
+  "description": "PostgreSQL navigation + Value.NativeQuery with {\"MENA\"} parameter list, merge with staging query, rename; second native query with null params and quoted identifiers.",
+  "pages": [
+    {
+      "id": "724fbdbcb488291a2234",
+      "name": "Executive Summary",
+      "hidden": false,
+      "visuals": [
+        {
+          "id": "de301e08822a92df8cbd",
+          "type": "card",
+          "role": "data",
+          "title": "Revenue (MENA)"
+        },
+        {
+          "id": "4776c319ec09f14bb5f3",
+          "type": "card",
+          "role": "data",
+          "title": "Orders"
+        },
+        {
+          "id": "aae79874a9250e001b33",
+          "type": "clusteredBarChart",
+          "role": "data",
+          "title": "Revenue by region"
+        },
+        {
+          "id": "2915942627f75c277661",
+          "type": "lineChart",
+          "role": "data",
+          "title": "Revenue vs target"
+        },
+        {
+          "id": "0fd23769f247a1769bf7",
+          "type": "slicer",
+          "role": "data",
+          "title": "Segment"
+        }
+      ]
+    },
+    {
+      "id": "81e09ee00eeb5c05c9d5",
+      "name": "Customers",
+      "hidden": false,
+      "visuals": [
+        {
+          "id": "cce66e5bdcbc5ef58615",
+          "type": "tableEx",
+          "role": "data",
+          "title": "Customer revenue"
+        },
+        {
+          "id": "1d168f505566a195d578",
+          "type": "donutChart",
+          "role": "data",
+          "title": "Revenue share by segment"
+        },
+        {
+          "id": "5561133cf1236b6967d6",
+          "type": "gauge",
+          "role": "data",
+          "title": "Revenue vs 2025 target"
+        }
+      ]
+    }
+  ],
+  "directCsvSources": [],
+  "postgresSources": [
+    {
+      "server": "pg-host:5432",
+      "database": "analytics",
+      "tables": [
+        {
+          "schema": "ref",
+          "item": "regions"
+        },
+        {
+          "schema": "sales",
+          "item": "customer"
+        }
+      ],
+      "nativeQueries": [
+        {
+          "sql": "select o.order_id, o.order_date, o.customer_id, o.region_code, o.amount, o.status\nfrom sales.orders o\nwhere o.region = $1\n  and o.status <> 'cancelled'",
+          "parameters": [
+            "MENA"
+          ]
+        },
+        {
+          "sql": "select \"Region\" as region_code, target_month, target_amount\nfrom planning.\"MonthlyTargets\"\nwhere fiscal_year = 2025",
+          "parameters": []
+        }
+      ],
+      "hasUnresolvedNativeQuery": false
+    }
+  ],
+  "unsupportedConnectors": [],
+  "reportModelReference": "local-path",
+  "model": {
+    "tables": [
+      "Orders",
+      "Customer",
+      "Targets"
+    ],
+    "expressions": [
+      "Regions"
+    ],
+    "measures": 4,
+    "relationships": 1
+  },
+  "shouldPassPreflight": true,
+  "files": [
+    ".gitignore",
+    "SalesPostgres.Report/.platform",
+    "SalesPostgres.Report/StaticResources/SharedResources/BaseThemes/CY25SU11.json",
+    "SalesPostgres.Report/definition.pbir",
+    "SalesPostgres.Report/definition/pages/724fbdbcb488291a2234/page.json",
+    "SalesPostgres.Report/definition/pages/724fbdbcb488291a2234/visuals/0fd23769f247a1769bf7/visual.json",
+    "SalesPostgres.Report/definition/pages/724fbdbcb488291a2234/visuals/2915942627f75c277661/visual.json",
+    "SalesPostgres.Report/definition/pages/724fbdbcb488291a2234/visuals/4776c319ec09f14bb5f3/visual.json",
+    "SalesPostgres.Report/definition/pages/724fbdbcb488291a2234/visuals/aae79874a9250e001b33/visual.json",
+    "SalesPostgres.Report/definition/pages/724fbdbcb488291a2234/visuals/de301e08822a92df8cbd/visual.json",
+    "SalesPostgres.Report/definition/pages/81e09ee00eeb5c05c9d5/page.json",
+    "SalesPostgres.Report/definition/pages/81e09ee00eeb5c05c9d5/visuals/1d168f505566a195d578/visual.json",
+    "SalesPostgres.Report/definition/pages/81e09ee00eeb5c05c9d5/visuals/5561133cf1236b6967d6/visual.json",
+    "SalesPostgres.Report/definition/pages/81e09ee00eeb5c05c9d5/visuals/cce66e5bdcbc5ef58615/visual.json",
+    "SalesPostgres.Report/definition/pages/pages.json",
+    "SalesPostgres.Report/definition/report.json",
+    "SalesPostgres.Report/definition/version.json",
+    "SalesPostgres.SemanticModel/.pbi/cache.abf",
+    "SalesPostgres.SemanticModel/.pbi/editorSettings.json",
+    "SalesPostgres.SemanticModel/.platform",
+    "SalesPostgres.SemanticModel/definition.pbism",
+    "SalesPostgres.SemanticModel/definition/cultures/en-US.tmdl",
+    "SalesPostgres.SemanticModel/definition/database.tmdl",
+    "SalesPostgres.SemanticModel/definition/expressions.tmdl",
+    "SalesPostgres.SemanticModel/definition/model.tmdl",
+    "SalesPostgres.SemanticModel/definition/relationships.tmdl",
+    "SalesPostgres.SemanticModel/definition/tables/Customer.tmdl",
+    "SalesPostgres.SemanticModel/definition/tables/Orders.tmdl",
+    "SalesPostgres.SemanticModel/definition/tables/Targets.tmdl",
+    "SalesPostgres.pbip"
+  ]
+}

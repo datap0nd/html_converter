@@ -1,0 +1,34 @@
+table Targets
+	lineageTag: 0b7032b2-abd8-4272-b7d3-e4226e2c26a2
+
+	column 'Region Code'
+		dataType: string
+		lineageTag: 2d28cf76-8e57-4432-9612-0c8904c86888
+		summarizeBy: none
+		sourceColumn: Region Code
+
+		annotation SummarizationSetBy = Automatic
+
+	column Target
+		dataType: double
+		lineageTag: 320318fa-63e6-44fb-ac25-a461867c26e3
+		summarizeBy: none
+		sourceColumn: Target
+
+		annotation SummarizationSetBy = Automatic
+
+	partition Targets = m
+		mode: import
+		source =
+				let
+				    Source = Excel.Workbook(File.Contents("{{DATA_PATH:targets.xlsx}}"), null, true),
+				    Targets_Sheet = Source{[Item="Targets",Kind="Sheet"]}[Data],
+				    #"Promoted Headers" = Table.PromoteHeaders(Targets_Sheet, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers",{{"Region Code", type text}, {"Target", type number}})
+				in
+				    #"Changed Type"
+
+	annotation PBI_NavigationStepName = Navigation
+
+	annotation PBI_ResultType = Table
+

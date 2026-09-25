@@ -61,8 +61,12 @@ export function pageLimitFromArgs(args) {
 // Hidden tooltip/drillthrough pages only fill in when there are too few visible ones.
 export function selectPages(pages, pageLimit) {
   if (!pageLimit) return pages;
-  const chosen = pages.filter(page => !page.hidden).slice(0, pageLimit);
-  if (chosen.length < pageLimit) chosen.push(...pages.filter(page => page.hidden).slice(0, pageLimit - chosen.length));
+  const hasContent = page => page.visuals.some(visual => visual.role !== 'group');
+  // Visible pages with visuals first; empty or hidden pages only fill remaining slots.
+  const chosen = [];
+  for (const candidates of [pages.filter(page => !page.hidden && hasContent(page)), pages.filter(page => !page.hidden && !hasContent(page)), pages.filter(page => page.hidden)]) {
+    for (const page of candidates) if (chosen.length < pageLimit) chosen.push(page);
+  }
   const ids = new Set(chosen.map(page => page.id));
   return pages.filter(page => ids.has(page.id));
 }
@@ -672,12 +676,17 @@ async function preflight(inventory, digest, env) {
   if (blocking.length && env.HC_ALLOW_UNSUPPORTED_CONNECTORS !== 'true') {
     throw new ConversionError(`The selected pages need data from connector(s) this converter has no driver for: ${blocking.map(item => `${item.connector} (${item.usedBy.slice(0, 3).join(', ')})`).join('; ')}.`, { phase: 'preflight', hint: 'Only PostgreSQL and local/network CSV/JSON files can be read live. Choose pages that use those sources, or set HC_ALLOW_UNSUPPORTED_CONNECTORS=true in gemini/.env to build anyway with labeled placeholders.' });
   }
-  const unreadable = (inventory.directCsvSources ?? []).filter(source => !source.available);
-  if (unreadable.length) {
-    const scopedText = JSON.stringify(digest.model ?? {});
-    const needed = unreadable.filter(source => scopedText.includes(JSON.stringify(source.path).slice(1, -1)) || scopedText.includes(source.path.replaceAll('\\', '\\\\')));
-    for (const source of unreadable) log.warn('preflight', `CSV source not readable from this PC: ${source.path} (${source.error}).`);
-    if (needed.length) throw new ConversionError(`The selected pages read CSV file(s) this PC cannot open: ${needed.map(source => source.path).join(', ')}.`, { phase: 'preflight', hint: 'Connect to VPN / the network share, check the path exists for your Windows account, then rerun .\\setup.ps1.' });
+  const scopedFiles = new Set((digest.model?.tables ?? []).map(table => table.source).concat((digest.model?.expressions ?? []).map(item => item.source)));
+  for (const source of inventory.fileSources ?? []) {
+    if (source.available) continue;
+    const inScope = scopedFiles.has(source.referencedBy) || !scopedFiles.size;
+    log.warn('preflight', `File source not readable from this PC: ${source.path} (${source.error})${inScope ? '' : ' - not used by the selected pages'}.`);
+  }
+  const needed = (inventory.fileSources ?? []).filter(source => !source.available && (scopedFiles.has(source.referencedBy) || !scopedFiles.size));
+  if (needed.length) throw new ConversionError(`The selected pages read file(s) this PC cannot open: ${needed.map(source => source.path).join(', ')}.`, { phase: 'preflight', hint: 'Connect to VPN / the network share, check the path exists for your Windows account (and that the M parameter holding the folder is right), then rerun .\\setup.ps1.' });
+  for (const item of inventory.unresolvedSources ?? []) {
+    if (scopedFiles.size && ![...scopedFiles].some(file => item.referencedBy.startsWith(file))) continue;
+    log.warn('preflight', `Cannot check ${item.connector}(${item.arguments}) in ${item.referencedBy} before the run: its target is computed. The generated backend's source healthcheck will test it.`);
   }
   for (const source of inventory.postgresSources ?? []) {
     if (!env.PG_USER || !env.PG_PASSWORD) throw new ConversionError(`The report reads PostgreSQL ${source.server}/${source.database}, but PG_USER/PG_PASSWORD are empty.`, { phase: 'preflight', hint: `Open ${rel(path.join(root, '.env'))} and fill PG_USER and PG_PASSWORD with a read-only login, then rerun .\\setup.ps1.` });
@@ -717,6 +726,8 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
   const inventory = { ...discovered, pages: selected, pageScope: { mode: scope.key, selectedPages: selected.length, totalPages: discovered.pages.length, selectedPageIds: selected.map(page => page.id) } };
   if (!inventory.pages.length || !inventory.pages.some(page => page.visuals.length)) throw new ConversionError('No enhanced PBIR pages/visuals found; cannot verify a generated report against this PBIP format.', { hint: 'In Power BI Desktop enable File > Options > Preview features > "Store reports using enhanced metadata format (PBIR)", save the project as .pbip again, and copy the whole folder into gemini/input.' });
   if (inventory.reportModelReferences.some(x => x.kind === 'remote-connection')) throw new ConversionError('PBIR references a remote semantic model. This no-Fabric workflow requires a local model definition.', { hint: 'Save the report together with its local .SemanticModel folder as a PBIP project.' });
+  if (inventory.reportModelReferences.some(x => x.kind === 'missing-local-path')) throw new ConversionError('The report points to a semantic model folder that is not in gemini/input.', { hint: 'Copy the whole PBIP project into gemini/input: the .pbip file plus BOTH the .Report and the .SemanticModel folders, keeping their names.' });
+  for (const problem of discovered.problems ?? []) log.warn('scan', problem);
   log.info('scope', scopeSummary(inventory, discovered));
   const skippedHidden = pageLimit ? discovered.pages.slice(0, discovered.pages.indexOf(selected[selected.length - 1]) + 1).filter(page => page.hidden && !selected.includes(page)) : [];
   if (skippedHidden.length) log.info('scope', `Skipped hidden page(s) not visible to report readers: ${skippedHidden.map(page => `"${page.name}"`).join(', ')}.`);

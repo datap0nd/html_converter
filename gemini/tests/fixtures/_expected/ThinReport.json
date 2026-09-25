@@ -1,0 +1,37 @@
+{
+  "fixture": "ThinReport",
+  "description": "Report bound byConnection to a service semantic model; no local model. Must stop before any Gemini call.",
+  "pages": [
+    {
+      "id": "05314efb002db5ff4fc1",
+      "name": "Overview",
+      "hidden": false,
+      "visuals": [
+        {
+          "id": "6e3a90edcc142730bf1f",
+          "type": "card",
+          "role": "data",
+          "title": "Total Sales"
+        }
+      ]
+    }
+  ],
+  "directCsvSources": [],
+  "postgresSources": [],
+  "unsupportedConnectors": [],
+  "reportModelReference": "remote-connection",
+  "shouldPassPreflight": false,
+  "expectedPreflightError": "remote semantic model",
+  "files": [
+    ".gitignore",
+    "ThinReport.Report/.platform",
+    "ThinReport.Report/StaticResources/SharedResources/BaseThemes/CY26SU05.json",
+    "ThinReport.Report/definition.pbir",
+    "ThinReport.Report/definition/pages/05314efb002db5ff4fc1/page.json",
+    "ThinReport.Report/definition/pages/05314efb002db5ff4fc1/visuals/6e3a90edcc142730bf1f/visual.json",
+    "ThinReport.Report/definition/pages/pages.json",
+    "ThinReport.Report/definition/report.json",
+    "ThinReport.Report/definition/version.json",
+    "ThinReport.pbip"
+  ]
+}

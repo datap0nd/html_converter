@@ -1,0 +1,46 @@
+table _Measures
+	lineageTag: 28aec2b4-2616-4600-a109-5cd70c0ed7fb
+
+	measure 'Quote Test' = "He said ""hi"" – " & FORMAT([Total], "#,0.00") & " (it's ""fine"")"
+		lineageTag: 1e9c60b5-46be-411b-bf46-9b47f89cd832
+
+	measure 'Title Text' = "Sales for " & SELECTEDVALUE('Fact Sales'[Channel], "all channels")
+		lineageTag: 83b56cf2-bd51-43ff-a239-50fc317a7ab5
+
+	measure 'Button Text' = "Drill into " & FORMAT([Total], "#,0") & " sales"
+		lineageTag: be87abe1-578c-4813-a09d-2f4caa147ce7
+
+	measure 'Fenced Measure' = ```
+			VAR _t = [Total]
+
+			// the blank line above is legal inside a fenced expression
+			RETURN _t * 1.1
+			```
+		formatString: #,0.00
+		lineageTag: a41cff1f-7574-4969-8f89-a4303579f864
+
+	measure 'Dynamic Format' = [Total]
+		lineageTag: ec7cd12e-f298-4543-b958-3a024b3ae867
+
+		formatStringDefinition = IF([Total] >= 1000000, "#,0,,.0M", "#,0")
+
+	column Column1
+		dataType: string
+		isHidden
+		lineageTag: 504156c8-f3d4-43bd-85be-7c683d88827a
+		summarizeBy: none
+		sourceColumn: Column1
+
+		annotation SummarizationSetBy = Automatic
+
+	partition _Measures = m
+		mode: import
+		source =
+				let
+				    Source = Table.FromRows(Json.Document(Binary.Decompress(Binary.FromText("i44FAA==", BinaryEncoding.Base64), Compression.Deflate)), let _t = ((type nullable text) meta [Serialized.Text = true]) in type table [Column1 = _t]),
+				    #"Changed Type" = Table.TransformColumnTypes(Source,{{"Column1", type text}})
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

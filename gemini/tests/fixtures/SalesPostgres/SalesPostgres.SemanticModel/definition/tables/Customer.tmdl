@@ -1,0 +1,60 @@
+table Customer
+	lineageTag: 86df4d26-5cee-4556-9797-46e7ed1a2561
+
+	column customer_id
+		dataType: int64
+		formatString: 0
+		lineageTag: 1b86f14b-93c4-476c-929f-2cda95341463
+		summarizeBy: none
+		sourceColumn: customer_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column customer_name
+		dataType: string
+		lineageTag: 6f566fb4-148b-4ed9-b2a7-ab85583f88ea
+		summarizeBy: none
+		sourceColumn: customer_name
+
+		annotation SummarizationSetBy = Automatic
+
+	column segment
+		dataType: string
+		lineageTag: ad37a583-2933-49ac-8c6b-b8fce6a6964d
+		summarizeBy: none
+		sourceColumn: segment
+
+		annotation SummarizationSetBy = Automatic
+
+	column country
+		dataType: string
+		lineageTag: 070c8dd8-de47-4451-bd62-13a1dd432a0a
+		summarizeBy: none
+		sourceColumn: country
+
+		annotation SummarizationSetBy = Automatic
+
+	column is_active
+		dataType: boolean
+		formatString: """TRUE"";""TRUE"";""FALSE"""
+		lineageTag: 55898c0f-5e4a-4e38-9a5e-d6c9596de06a
+		summarizeBy: none
+		sourceColumn: is_active
+
+		annotation SummarizationSetBy = Automatic
+
+	partition Customer = m
+		mode: import
+		source =
+				let
+				    Source = PostgreSQL.Database("pg-host:5432", "analytics"),
+				    sales_customer = Source{[Schema="sales",Item="customer"]}[Data],
+				    #"Removed Columns" = Table.RemoveColumns(sales_customer,{"email", "phone"}),
+				    #"Filtered Rows" = Table.SelectRows(#"Removed Columns", each [is_active] = true)
+				in
+				    #"Filtered Rows"
+
+	annotation PBI_NavigationStepName = Navigation
+
+	annotation PBI_ResultType = Table
+

@@ -1,0 +1,14 @@
+expression Regions =
+			let
+			    Source = PostgreSQL.Database("pg-host:5432", "analytics"),
+			    ref_regions = Source{[Schema="ref",Item="regions"]}[Data],
+			    #"Removed Other Columns" = Table.SelectColumns(ref_regions,{"region_code", "region_name"})
+			in
+			    #"Removed Other Columns"
+	lineageTag: 757ac353-95b6-44a5-9e7b-16f23233a041
+	queryGroup: Staging
+
+	annotation PBI_NavigationStepName = Navigation
+
+	annotation PBI_ResultType = Table
+

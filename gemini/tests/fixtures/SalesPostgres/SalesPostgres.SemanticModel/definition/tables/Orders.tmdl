@@ -1,0 +1,90 @@
+table Orders
+	lineageTag: 9e484280-f32a-49fa-a578-4e1fd7845b1d
+
+	measure 'Total Amount' = SUM(Orders[Amount])
+		formatString: \$#,0;(\$#,0);\$#,0
+		lineageTag: 4ca1c8af-3cca-4ce5-9bfe-a099395d85e3
+
+	measure 'Order Count' = COUNTROWS(Orders)
+		formatString: #,0
+		lineageTag: 4468fecd-14ae-46dc-9fc2-4bfc3d0db03e
+
+	measure 'Avg Order Value' = DIVIDE([Total Amount], [Order Count])
+		formatString: \$#,0.00
+		lineageTag: 2cd99545-7e8e-43ae-bc50-f5d6a9924de8
+
+	column order_id
+		dataType: int64
+		formatString: 0
+		lineageTag: 8eb1eb2b-0411-4872-a3a8-2bbf7130aac4
+		summarizeBy: none
+		sourceColumn: order_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column order_date
+		dataType: dateTime
+		formatString: Short Date
+		lineageTag: 8fc6dc15-56b0-4378-9083-0be747a733b6
+		summarizeBy: none
+		sourceColumn: order_date
+
+		annotation SummarizationSetBy = Automatic
+
+	column customer_id
+		dataType: int64
+		isHidden
+		formatString: 0
+		lineageTag: 1b86f14b-93c4-476c-929f-2cda95341463
+		summarizeBy: none
+		sourceColumn: customer_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column region_code
+		dataType: string
+		lineageTag: e60b8ba8-79c2-43dd-9def-7cbfcaf4640a
+		summarizeBy: none
+		sourceColumn: region_code
+
+		annotation SummarizationSetBy = Automatic
+
+	column Amount
+		dataType: decimal
+		formatString: \$#,0.00;(\$#,0.00);\$#,0.00
+		lineageTag: 96f2f0e8-2ec8-4541-b8ee-0f8db39ba432
+		summarizeBy: sum
+		sourceColumn: Amount
+
+		annotation SummarizationSetBy = Automatic
+
+	column status
+		dataType: string
+		lineageTag: eaa6712a-4545-490e-963e-89782698e157
+		summarizeBy: none
+		sourceColumn: status
+
+		annotation SummarizationSetBy = Automatic
+
+	column Region
+		dataType: string
+		lineageTag: fd620eef-7eb9-42bb-a206-0f8f22408c1d
+		summarizeBy: none
+		sourceColumn: Region
+
+		annotation SummarizationSetBy = Automatic
+
+	partition Orders = m
+		mode: import
+		source =
+				let
+				    Source = Value.NativeQuery(PostgreSQL.Database("pg-host:5432", "analytics"), "select o.order_id, o.order_date, o.customer_id, o.region_code, o.amount, o.status#(lf)from sales.orders o#(lf)where o.region = $1#(lf)  and o.status <> 'cancelled'", {"MENA"}, [EnableFolding=true]),
+				    #"Merged Queries" = Table.NestedJoin(Source, {"region_code"}, Regions, {"region_code"}, "Regions", JoinKind.LeftOuter),
+				    #"Expanded Regions" = Table.ExpandTableColumn(#"Merged Queries", "Regions", {"region_name"}, {"region_name"}),
+				    #"Renamed Columns" = Table.RenameColumns(#"Expanded Regions",{{"amount", "Amount"}, {"region_name", "Region"}}),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"order_date", type date}, {"Amount", Currency.Type}})
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

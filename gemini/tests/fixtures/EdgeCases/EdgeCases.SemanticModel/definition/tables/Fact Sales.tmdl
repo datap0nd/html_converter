@@ -1,0 +1,68 @@
+table 'Fact Sales'
+	lineageTag: eea6cb2c-f715-4923-87e2-62d75125c978
+
+	/// Sum of order amounts. Mentions "quotes" & <angle brackets>.
+	measure Total = SUM('Fact Sales'[Amount])
+		formatString: #,0.00
+		lineageTag: c1994cfc-077b-46de-8625-ed97b94b7892
+
+	column 'Order Date'
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 25e1abb0-c781-497a-a702-a922f3a4de23
+		summarizeBy: none
+		sourceColumn: Order Date
+
+		variation Variation
+			isDefault
+			relationship: 18ea6910-4654-441a-8c5a-6b40b98f0bf6
+			defaultHierarchy: LocalDateTable_5cb33fe7-583b-4a68-924e-fc66e315fc0e.'Date Hierarchy'
+
+		annotation SummarizationSetBy = Automatic
+
+	column Channel
+		dataType: string
+		lineageTag: f890821d-f3f1-4fae-ba6d-9414a1c0e202
+		summarizeBy: none
+		sourceColumn: Channel
+
+		annotation SummarizationSetBy = Automatic
+
+	column CustomerKey
+		dataType: int64
+		isHidden
+		formatString: 0
+		lineageTag: edcdeaab-d20d-4d1d-bed0-a57e4f5a0193
+		summarizeBy: none
+		sourceColumn: CustomerKey
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Region Code'
+		dataType: string
+		lineageTag: 2d28cf76-8e57-4432-9612-0c8904c86888
+		summarizeBy: none
+		sourceColumn: Region Code
+
+		annotation SummarizationSetBy = Automatic
+
+	column Amount
+		dataType: double
+		formatString: #,0.00
+		lineageTag: e639fa45-6047-4a7c-8ba3-d924e4be8d84
+		summarizeBy: sum
+		sourceColumn: Amount
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Fact Sales' = m
+		mode: import
+		source =
+				let
+				    Source = Sql.Database("sql-server.corp.example", "SalesDW", [Query="SELECT OrderDate AS [Order Date], Channel, CustomerKey, RegionCode AS [Region Code], Amount#(lf)FROM dbo.FactSales#(lf)WHERE OrderDate >= '2023-01-01'", CommandTimeout=#duration(0, 0, 10, 0)]),
+				    #"Changed Type" = Table.TransformColumnTypes(Source,{{"Order Date", type datetime}, {"Amount", type number}})
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

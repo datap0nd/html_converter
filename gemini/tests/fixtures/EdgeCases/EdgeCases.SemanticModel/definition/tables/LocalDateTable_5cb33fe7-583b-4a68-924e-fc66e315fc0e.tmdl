@@ -1,0 +1,69 @@
+table LocalDateTable_5cb33fe7-583b-4a68-924e-fc66e315fc0e
+	isHidden
+	showAsVariationsOnly
+	lineageTag: b68446cd-c600-4fe5-b35a-4cf0d285796e
+
+	column Date
+		dataType: dateTime
+		isHidden
+		lineageTag: cdfa8b30-a362-48ba-b820-5adcb42cc8b9
+		dataCategory: PaddedDateTableDates
+		summarizeBy: none
+		isNameInferred
+		sourceColumn: [Date]
+
+		annotation SummarizationSetBy = User
+
+	column Year = YEAR([Date])
+		dataType: int64
+		isHidden
+		lineageTag: 73644a0b-9ba8-43b0-8593-860b7f7c4653
+		dataCategory: Years
+		summarizeBy: none
+
+		annotation SummarizationSetBy = User
+
+		annotation TemplateId = Year
+
+	column MonthNo = MONTH([Date])
+		dataType: int64
+		isHidden
+		lineageTag: 5e6b40d7-3077-46b4-bb87-05d794ef3e9d
+		dataCategory: MonthOfYear
+		summarizeBy: none
+
+		annotation SummarizationSetBy = User
+
+		annotation TemplateId = MonthNumber
+
+	column Month = FORMAT([Date], "MMMM")
+		dataType: string
+		isHidden
+		lineageTag: 8e78881c-59d1-43fc-bf90-1ad8569673a8
+		dataCategory: Months
+		summarizeBy: none
+		sortByColumn: MonthNo
+
+		annotation SummarizationSetBy = User
+
+		annotation TemplateId = Month
+
+	hierarchy 'Date Hierarchy'
+		lineageTag: 30e59331-4523-4e82-a272-c78b3b3f12a0
+
+		level Year
+			lineageTag: 9c8728d3-30df-41ce-b97f-9d7d442fa64f
+			column: Year
+
+		level Month
+			lineageTag: fa1daa08-451e-4fcd-90b3-dc77773800cb
+			column: Month
+
+		annotation TemplateId = DateHierarchy
+
+	partition LocalDateTable_5cb33fe7-583b-4a68-924e-fc66e315fc0e = calculated
+		mode: import
+		source = Calendar(Date(Year(MIN('Fact Sales'[Order Date])), 1, 1), Date(Year(MAX('Fact Sales'[Order Date])), 12, 31))
+
+	annotation __PBI_LocalDateTable = true
+

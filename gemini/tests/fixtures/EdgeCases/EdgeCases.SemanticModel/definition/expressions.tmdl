@@ -1,0 +1,18 @@
+expression PgServer = "pg-host:5432" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+	lineageTag: e875e48c-7ed3-48de-a837-cd88f04440b0
+	queryGroup: Parameters
+
+	annotation PBI_ResultType = Text
+
+expression PgDatabase = "analytics" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+	lineageTag: b8e4d9b2-5a21-4c99-be1a-6523afa52fb8
+	queryGroup: Parameters
+
+	annotation PBI_ResultType = Text
+
+expression DataFolder = "{{DATA_DIR}}" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+	lineageTag: e02cea31-0fbf-40d2-bc55-c6626db87b1a
+	queryGroup: Parameters
+
+	annotation PBI_ResultType = Text
+

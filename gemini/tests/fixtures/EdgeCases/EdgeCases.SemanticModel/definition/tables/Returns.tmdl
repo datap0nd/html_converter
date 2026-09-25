@@ -1,0 +1,51 @@
+table Returns
+	lineageTag: af773664-2d3a-411a-9417-28cec2bdd64d
+
+	column ReturnDate
+		dataType: dateTime
+		formatString: Short Date
+		lineageTag: a2cd3f8f-e182-4611-87a2-35508c300247
+		summarizeBy: none
+		sourceColumn: ReturnDate
+
+		annotation SummarizationSetBy = Automatic
+
+	column OrderID
+		dataType: int64
+		formatString: 0
+		lineageTag: ae165da1-586e-4ac1-8154-8ca4c66c2670
+		summarizeBy: none
+		sourceColumn: OrderID
+
+		annotation SummarizationSetBy = Automatic
+
+	column Quantity
+		dataType: int64
+		formatString: 0
+		lineageTag: 1ec2fc8e-9a2b-4e0f-ad99-cc55ed22935d
+		summarizeBy: none
+		sourceColumn: Quantity
+
+		annotation SummarizationSetBy = Automatic
+
+	column Reason
+		dataType: string
+		lineageTag: 50aaac48-7218-44c7-bb02-9fd40b1dbf59
+		summarizeBy: none
+		sourceColumn: Reason
+
+		annotation SummarizationSetBy = Automatic
+
+	partition Returns = m
+		mode: import
+		source =
+				let
+				    // TODO: switch to Folder.Files once the monthly exports land in one folder
+				    Source = Csv.Document(File.Contents(DataFolder & "returns.txt"),[Delimiter="#(tab)", Columns=4, Encoding=65001, QuoteStyle=QuoteStyle.None]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers",{{"ReturnDate", type date}, {"OrderID", Int64.Type}, {"Quantity", Int64.Type}, {"Reason", type text}})
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

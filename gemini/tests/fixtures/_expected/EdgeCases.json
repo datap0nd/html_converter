@@ -1,0 +1,268 @@
+{
+  "fixture": "EdgeCases",
+  "description": "Parser traps: odd page ids, unordered/orphan pages, BOM/CRLF files, unicode names, report-extension measure, measure-bound title/button text, hidden visual, custom visual, visual calc, auto date/time, calc group, parameterised and non-CSV sources, Enter Data table, TMDL fenced expression.",
+  "pages": [
+    {
+      "id": "ReportSection854b3de7b49746d29ebd",
+      "name": "Q&A <Ventes> \"été\"",
+      "hidden": false,
+      "visuals": [
+        {
+          "id": "a0717fad4aff06db6c84",
+          "type": "card",
+          "role": "data",
+          "title": null,
+          "note": "title bound to a measure (fx); value is a report-extension measure absent from TMDL"
+        },
+        {
+          "id": "6bda22c060ddd052a206",
+          "type": "lineChart",
+          "role": "data",
+          "title": "Trend (auto date hierarchy × calc group)"
+        },
+        {
+          "id": "68805d2fda0223ce7347",
+          "type": "textbox",
+          "role": "decorative",
+          "title": null
+        },
+        {
+          "id": "794db2c36d3acbdd73a4",
+          "type": "visualGroup",
+          "role": "group",
+          "title": "Nav <group> & 'buttons'"
+        },
+        {
+          "id": "27d05fb5022a13e3f364",
+          "type": "actionButton",
+          "role": "data",
+          "title": null,
+          "note": "button text is bound to a measure: renders data but has no query projections"
+        },
+        {
+          "id": "458c6dc5958a21cdfbb9",
+          "type": "card",
+          "role": "data",
+          "title": "Hidden (bookmark toggled)",
+          "hidden": true
+        },
+        {
+          "id": "3df808dc86e4c9706b93",
+          "type": "tableEx",
+          "role": "data",
+          "title": "Ventes – été ✓ O'Brien"
+        },
+        {
+          "id": "e91ff70c2c5ee86f23f7",
+          "type": "clusteredColumnChart",
+          "role": "data",
+          "title": "Q&A <Ventes> \"été\"",
+          "note": "file saved with UTF-8 BOM and CRLF"
+        },
+        {
+          "id": "7f8fc5451c8141fb082c",
+          "type": "ChicletSlicer1448559807354",
+          "role": "data",
+          "title": "Channel (AppSource custom visual)",
+          "note": "custom visual runtime code is not in the PBIP"
+        },
+        {
+          "id": "0ec67bfbbfdcf9b56144",
+          "type": "multiRowCard",
+          "role": "data",
+          "title": null,
+          "note": "title literal is empty"
+        }
+      ]
+    },
+    {
+      "id": "8550651efe63a1f79df1dc53c3cbe6c5",
+      "name": "Página vazia — 空白",
+      "hidden": false,
+      "visuals": []
+    },
+    {
+      "id": "Page_Drillthrough",
+      "name": "Drill <details>",
+      "hidden": true,
+      "visuals": [
+        {
+          "id": "5e8dec04bc3a9feb5dbb",
+          "type": "tableEx",
+          "role": "data",
+          "title": "Drillthrough detail"
+        }
+      ]
+    },
+    {
+      "id": "4c59645e8e12373532b8",
+      "name": "Ünïcödé & \"quotes\" 'single'",
+      "hidden": false,
+      "visuals": [
+        {
+          "id": "cf119b1472e4477de233",
+          "type": "listSlicer",
+          "role": "data",
+          "title": "Customer's region"
+        },
+        {
+          "id": "98f60e6eb959c8ecbb79",
+          "type": "cardVisual",
+          "role": "data",
+          "title": null
+        },
+        {
+          "id": "475528ad13c568d4ae4e",
+          "type": "tableEx",
+          "role": "data",
+          "title": "Stores (semicolon CSV, cp1252)"
+        }
+      ]
+    }
+  ],
+  "directCsvSources": [
+    "stores_eu.csv"
+  ],
+  "postgresSources": [
+    {
+      "server": "(M parameter PgServer = \"pg-host:5432\")",
+      "database": "(M parameter PgDatabase = \"analytics\")",
+      "tables": [
+        {
+          "schema": "ref",
+          "item": "customer_region"
+        }
+      ],
+      "nativeQueries": [],
+      "hasUnresolvedNativeQuery": false,
+      "parameterised": true
+    }
+  ],
+  "unsupportedConnectors": [
+    "Sql.Database",
+    "Web.Contents",
+    "Excel.Workbook",
+    "File.Contents(parameterised .txt: DataFolder & \"returns.txt\")",
+    "Enter Data (Binary.Decompress, embedded rows - supported offline)"
+  ],
+  "reportModelReference": "local-path",
+  "model": {
+    "tables": [
+      "Fact Sales",
+      "Customer's Region",
+      "Rates",
+      "Targets",
+      "Returns",
+      "Stores EU",
+      "Manual Targets",
+      "_Measures",
+      "Time Intelligence",
+      "LocalDateTable_5cb33fe7-583b-4a68-924e-fc66e315fc0e",
+      "DateTableTemplate_89c70cfd-a455-4eb5-8b9e-1c3b268b3b6f"
+    ],
+    "calculationGroup": {
+      "table": "Time Intelligence",
+      "items": [
+        "Current",
+        "YTD",
+        "Prior Year"
+      ]
+    },
+    "hiddenTables": [
+      "LocalDateTable_5cb33fe7-583b-4a68-924e-fc66e315fc0e",
+      "DateTableTemplate_89c70cfd-a455-4eb5-8b9e-1c3b268b3b6f"
+    ],
+    "hiddenColumns": [
+      "Fact Sales.CustomerKey",
+      "_Measures.Column1"
+    ],
+    "expressions": [
+      "PgServer",
+      "PgDatabase",
+      "DataFolder"
+    ],
+    "relationships": 3,
+    "reportExtensionMeasures": [
+      "Fact Sales.Sales Label (report)"
+    ]
+  },
+  "traps": [
+    "page.json of page 1 and one visual.json are saved with a UTF-8 BOM (the visual also CRLF)",
+    "model.tmdl has a BOM + CRLF; Fact Sales.tmdl CRLF; everything else LF",
+    "pages.json lists an orphan page id 0123456789abcdef0123 and omits 4c59645e8e12373532b8; per the pagesMetadata schema the omitted page is appended after ordered pages",
+    "page 8550651efe63a1f79df1dc53c3cbe6c5 has no visuals folder at all",
+    "page Page_Drillthrough is a hidden drillthrough page (pageBinding type Drillthrough)",
+    "card title and button text are bound to measures (expr.Measure) rather than literals",
+    "card value uses a report-level measure defined only in reportExtensions.json",
+    "a hidden visual (isHidden) inside a visual group; group mode ScrollMode",
+    "AppSource custom visual (ChicletSlicer...) listed in report.json publicCustomVisuals",
+    "visual calculation (NativeVisualCalculation) in a tableEx",
+    "auto date/time: LocalDateTable_*/DateTableTemplate_* tables + variation + HierarchyLevel/PropertyVariationSource projections",
+    "table name with an apostrophe: 'Customer''s Region' (TMDL) / Customer's Region (PBIR Entity)",
+    "calculation group (nameless calculationGroup object with calculationItems)",
+    "PostgreSQL.Database(PgServer, PgDatabase) driven by M parameters",
+    "File.Contents(DataFolder & \"returns.txt\") - parameterised, non-.csv, tab-delimited",
+    "Excel.Workbook(File.Contents(...xlsx)) - not a CSV and not in the unsupported list; the xlsx intentionally does not exist",
+    "stores_eu.csv is ;-delimited and Windows-1252 encoded (Encoding=1252)",
+    "a Power Query comment mentions Folder.Files but the query does not use it",
+    "TMDLScripts/Script 1.tmdl contains OData.Feed but is a script, not the model",
+    "DAX string with doubled quotes and an apostrophe; a ``` fenced multi-line measure containing a blank line; formatStringDefinition",
+    "bookmarks folder, mobile.json, DAXQueries, .pbi/cache.abf present as Desktop leaves them"
+  ],
+  "shouldPassPreflight": true,
+  "files": [
+    ".gitignore",
+    "EdgeCases.Report/.platform",
+    "EdgeCases.Report/StaticResources/SharedResources/BaseThemes/CY26SU03.json",
+    "EdgeCases.Report/definition.pbir",
+    "EdgeCases.Report/definition/bookmarks/24b9e3b813727700df0f.bookmark.json",
+    "EdgeCases.Report/definition/bookmarks/bookmarks.json",
+    "EdgeCases.Report/definition/pages/4c59645e8e12373532b8/page.json",
+    "EdgeCases.Report/definition/pages/4c59645e8e12373532b8/visuals/475528ad13c568d4ae4e/visual.json",
+    "EdgeCases.Report/definition/pages/4c59645e8e12373532b8/visuals/98f60e6eb959c8ecbb79/visual.json",
+    "EdgeCases.Report/definition/pages/4c59645e8e12373532b8/visuals/cf119b1472e4477de233/visual.json",
+    "EdgeCases.Report/definition/pages/8550651efe63a1f79df1dc53c3cbe6c5/page.json",
+    "EdgeCases.Report/definition/pages/Page_Drillthrough/page.json",
+    "EdgeCases.Report/definition/pages/Page_Drillthrough/visuals/5e8dec04bc3a9feb5dbb/visual.json",
+    "EdgeCases.Report/definition/pages/ReportSection854b3de7b49746d29ebd/page.json",
+    "EdgeCases.Report/definition/pages/ReportSection854b3de7b49746d29ebd/visuals/0ec67bfbbfdcf9b56144/visual.json",
+    "EdgeCases.Report/definition/pages/ReportSection854b3de7b49746d29ebd/visuals/27d05fb5022a13e3f364/visual.json",
+    "EdgeCases.Report/definition/pages/ReportSection854b3de7b49746d29ebd/visuals/3df808dc86e4c9706b93/visual.json",
+    "EdgeCases.Report/definition/pages/ReportSection854b3de7b49746d29ebd/visuals/458c6dc5958a21cdfbb9/visual.json",
+    "EdgeCases.Report/definition/pages/ReportSection854b3de7b49746d29ebd/visuals/68805d2fda0223ce7347/visual.json",
+    "EdgeCases.Report/definition/pages/ReportSection854b3de7b49746d29ebd/visuals/6bda22c060ddd052a206/visual.json",
+    "EdgeCases.Report/definition/pages/ReportSection854b3de7b49746d29ebd/visuals/794db2c36d3acbdd73a4/visual.json",
+    "EdgeCases.Report/definition/pages/ReportSection854b3de7b49746d29ebd/visuals/7f8fc5451c8141fb082c/visual.json",
+    "EdgeCases.Report/definition/pages/ReportSection854b3de7b49746d29ebd/visuals/a0717fad4aff06db6c84/mobile.json",
+    "EdgeCases.Report/definition/pages/ReportSection854b3de7b49746d29ebd/visuals/a0717fad4aff06db6c84/visual.json",
+    "EdgeCases.Report/definition/pages/ReportSection854b3de7b49746d29ebd/visuals/e91ff70c2c5ee86f23f7/visual.json",
+    "EdgeCases.Report/definition/pages/pages.json",
+    "EdgeCases.Report/definition/report.json",
+    "EdgeCases.Report/definition/reportExtensions.json",
+    "EdgeCases.Report/definition/version.json",
+    "EdgeCases.SemanticModel/.pbi/cache.abf",
+    "EdgeCases.SemanticModel/.pbi/daxQueries.json",
+    "EdgeCases.SemanticModel/.pbi/localSettings.json",
+    "EdgeCases.SemanticModel/.platform",
+    "EdgeCases.SemanticModel/DAXQueries/Query 1.dax",
+    "EdgeCases.SemanticModel/TMDLScripts/Script 1.tmdl",
+    "EdgeCases.SemanticModel/definition.pbism",
+    "EdgeCases.SemanticModel/definition/cultures/en-US.tmdl",
+    "EdgeCases.SemanticModel/definition/database.tmdl",
+    "EdgeCases.SemanticModel/definition/expressions.tmdl",
+    "EdgeCases.SemanticModel/definition/model.tmdl",
+    "EdgeCases.SemanticModel/definition/relationships.tmdl",
+    "EdgeCases.SemanticModel/definition/tables/Customer's Region.tmdl",
+    "EdgeCases.SemanticModel/definition/tables/DateTableTemplate_89c70cfd-a455-4eb5-8b9e-1c3b268b3b6f.tmdl",
+    "EdgeCases.SemanticModel/definition/tables/Fact Sales.tmdl",
+    "EdgeCases.SemanticModel/definition/tables/LocalDateTable_5cb33fe7-583b-4a68-924e-fc66e315fc0e.tmdl",
+    "EdgeCases.SemanticModel/definition/tables/Manual Targets.tmdl",
+    "EdgeCases.SemanticModel/definition/tables/Rates.tmdl",
+    "EdgeCases.SemanticModel/definition/tables/Returns.tmdl",
+    "EdgeCases.SemanticModel/definition/tables/Stores EU.tmdl",
+    "EdgeCases.SemanticModel/definition/tables/Targets.tmdl",
+    "EdgeCases.SemanticModel/definition/tables/Time Intelligence.tmdl",
+    "EdgeCases.SemanticModel/definition/tables/_Measures.tmdl",
+    "EdgeCases.pbip"
+  ]
+}

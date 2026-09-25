@@ -1,0 +1,4 @@
+relationship 09a4a408-d1f7-4582-80e3-ac2d9bf5fd42
+	fromColumn: Orders.customer_id
+	toColumn: Customer.customer_id
+

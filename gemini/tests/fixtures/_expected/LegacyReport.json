@@ -1,0 +1,24 @@
+{
+  "fixture": "LegacyReport",
+  "description": "PBIR-Legacy (single report.json with sections) + model.bim. The live converter cannot verify this format and must stop fast with an actionable message (\"open in Desktop, File > Options > Preview features > Store reports using enhanced metadata format (PBIR), save\").",
+  "pages": [],
+  "directCsvSources": [
+    "legacy_sales.csv"
+  ],
+  "postgresSources": [],
+  "unsupportedConnectors": [],
+  "reportModelReference": "local-path",
+  "shouldPassPreflight": false,
+  "expectedPreflightError": "No enhanced PBIR pages\\/visuals found",
+  "files": [
+    ".gitignore",
+    "LegacyReport.Report/.platform",
+    "LegacyReport.Report/StaticResources/SharedResources/BaseThemes/CY24SU10.json",
+    "LegacyReport.Report/definition.pbir",
+    "LegacyReport.Report/report.json",
+    "LegacyReport.SemanticModel/.platform",
+    "LegacyReport.SemanticModel/definition.pbism",
+    "LegacyReport.SemanticModel/model.bim",
+    "LegacyReport.pbip"
+  ]
+}

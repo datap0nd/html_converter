@@ -1,0 +1,168 @@
+table Sales
+	lineageTag: 2040f638-bfe1-4fe4-8ce9-115eea52146b
+
+	measure 'Total Sales' = SUM(Sales[Line Total])
+		formatString: \$#,0.00;(\$#,0.00);\$#,0.00
+		displayFolder: Sales
+		lineageTag: 3b4e3185-da7f-4af7-b8c0-a2933a7b900f
+
+	measure 'Total Quantity' = SUM(Sales[Quantity])
+		formatString: #,0
+		displayFolder: Sales
+		lineageTag: e08c596e-e706-4281-928a-2b47cbd9bae1
+
+	measure 'Order Count' = DISTINCTCOUNT(Sales[OrderID])
+		formatString: #,0
+		displayFolder: Sales
+		lineageTag: a9578992-681f-40f2-96b3-c043f33f7432
+
+	measure 'Total Cost' = SUMX(Sales, Sales[Quantity] * RELATED(Product[StandardCost]))
+		formatString: \$#,0.00;(\$#,0.00);\$#,0.00
+		displayFolder: Profitability
+		lineageTag: 8907156e-360e-48b2-98e9-dc09378ca61f
+
+	measure Margin = [Total Sales] - [Total Cost]
+		formatString: \$#,0.00;(\$#,0.00);\$#,0.00
+		displayFolder: Profitability
+		lineageTag: 4f7cc598-e169-432f-a42c-271a3e0b023e
+
+	measure 'Margin %' = DIVIDE([Margin], [Total Sales])
+		formatString: 0.0%;-0.0%;0.0%
+		displayFolder: Profitability
+		lineageTag: c6406e2e-1ffd-408d-a557-8666405de48a
+
+	/// Sales through the online channel only.
+	measure 'Online Sales' = CALCULATE([Total Sales], Sales[Channel] = "Online")
+		formatString: \$#,0.00;(\$#,0.00);\$#,0.00
+		displayFolder: Sales
+		lineageTag: a3348547-6380-40e4-b5ff-bad9b41cfe72
+
+	measure 'Sales LY' =
+			CALCULATE(
+			    [Total Sales],
+			    SAMEPERIODLASTYEAR('Date'[Date])
+			)
+		formatString: \$#,0.00;(\$#,0.00);\$#,0.00
+		displayFolder: Time Intelligence
+		lineageTag: e0d2af03-41f7-4b9d-a9ae-82a10b647293
+
+	measure 'Sales YTD' = TOTALYTD([Total Sales], 'Date'[Date])
+		formatString: \$#,0.00;(\$#,0.00);\$#,0.00
+		displayFolder: Time Intelligence
+		lineageTag: f0f03a9a-8bf7-43ea-9901-22a68d282818
+
+	measure 'YoY %' =
+			VAR _ly = [Sales LY]
+			RETURN
+			    IF(NOT ISBLANK(_ly), DIVIDE([Total Sales] - _ly, _ly))
+		formatString: +0.0%;-0.0%;0.0%
+		displayFolder: Time Intelligence
+		lineageTag: 56b74e4e-63bf-43a0-971a-501b59f587f4
+
+	column OrderID
+		dataType: int64
+		formatString: 0
+		lineageTag: 337159e1-d0b3-4eb6-8d33-14d227f4e774
+		summarizeBy: none
+		sourceColumn: OrderID
+
+		annotation SummarizationSetBy = Automatic
+
+	column OrderDate
+		dataType: dateTime
+		formatString: Long Date
+		lineageTag: 6075c73c-7b4b-48b9-836e-e8f48c47a119
+		summarizeBy: none
+		sourceColumn: OrderDate
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	column ProductKey
+		dataType: int64
+		isHidden
+		formatString: 0
+		lineageTag: 8e5e1195-cc5b-4cdd-829f-9f29c0baa8b3
+		summarizeBy: none
+		sourceColumn: ProductKey
+
+		annotation SummarizationSetBy = Automatic
+
+	column Channel
+		dataType: string
+		lineageTag: 25ebb7c7-82c2-4b09-82eb-7bcac27fd49d
+		summarizeBy: none
+		sourceColumn: Channel
+
+		annotation SummarizationSetBy = Automatic
+
+	column Region
+		dataType: string
+		lineageTag: 45d6d214-41ac-4ca4-9d9b-d959e0579142
+		summarizeBy: none
+		sourceColumn: Region
+
+		annotation SummarizationSetBy = Automatic
+
+	column Quantity
+		dataType: int64
+		formatString: 0
+		lineageTag: 6b650366-d3a7-4884-97a7-f48e9f067085
+		summarizeBy: sum
+		sourceColumn: Quantity
+
+		annotation SummarizationSetBy = Automatic
+
+	column UnitPrice
+		dataType: double
+		formatString: \$#,0.00;(\$#,0.00);\$#,0.00
+		lineageTag: b3ff2a00-8bff-478c-a4bb-2946b7f707cd
+		summarizeBy: sum
+		sourceColumn: UnitPrice
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"currencyCulture":"en-US"}
+
+	column Discount
+		dataType: double
+		formatString: 0%
+		lineageTag: 3292c6cb-1b58-4c18-9feb-2d001db6c82a
+		summarizeBy: none
+		sourceColumn: Discount
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Year Month'
+		dataType: string
+		lineageTag: 5974a5a5-ac77-4a0a-8667-93088e318167
+		summarizeBy: none
+		sourceColumn: Year Month
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Line Total' = Sales[Quantity] * Sales[UnitPrice] * (1 - Sales[Discount])
+		dataType: double
+		formatString: \$#,0.00;(\$#,0.00);\$#,0.00
+		lineageTag: 845fee41-6844-4b88-a219-cbcadc285e38
+		summarizeBy: sum
+
+		annotation SummarizationSetBy = Automatic
+
+	partition Sales = m
+		mode: import
+		queryGroup: 'Fact Tables'
+		source =
+				let
+				    Source = Csv.Document(File.Contents("{{DATA_PATH:sales.csv}}"),[Delimiter=",", Columns=8, Encoding=65001, QuoteStyle=QuoteStyle.None]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers",{{"OrderID", Int64.Type}, {"OrderDate", type date}, {"ProductKey", Int64.Type}, {"Channel", type text}, {"Region", type text}, {"Quantity", Int64.Type}, {"UnitPrice", type number}, {"Discount", type number}}),
+				    #"Added Year Month" = Table.AddColumn(#"Changed Type", "Year Month", each Date.ToText([OrderDate], "yyyy-MM"), type text)
+				in
+				    #"Added Year Month"
+
+	annotation PBI_NavigationStepName = Navigation
+
+	annotation PBI_ResultType = Table
+

@@ -1,0 +1,8 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/page/2.1.0/schema.json",
+  "name": "8550651efe63a1f79df1dc53c3cbe6c5",
+  "displayName": "Página vazia — 空白",
+  "displayOption": "FitToPage",
+  "height": 720,
+  "width": 1280
+}

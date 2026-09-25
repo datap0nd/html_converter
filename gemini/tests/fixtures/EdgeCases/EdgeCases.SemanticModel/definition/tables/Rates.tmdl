@@ -1,0 +1,33 @@
+table Rates
+	lineageTag: 8c6114c0-8c83-4845-863e-fae2dad40fba
+
+	column Currency
+		dataType: string
+		lineageTag: ddc62535-98dc-4031-b644-30dbd8d421ec
+		summarizeBy: none
+		sourceColumn: Currency
+
+		annotation SummarizationSetBy = Automatic
+
+	column Rate
+		dataType: double
+		lineageTag: 9d9a69ba-e209-48fb-b723-e258dafb8481
+		summarizeBy: average
+		sourceColumn: Rate
+
+		annotation SummarizationSetBy = Automatic
+
+	partition Rates = m
+		mode: import
+		source =
+				let
+				    Source = Json.Document(Web.Contents("https://api.example.com", [RelativePath="v1/rates", Query=[base="USD"], Headers=[Accept="application/json"]])),
+				    rates = Source[rates],
+				    #"Converted to Table" = Record.ToTable(rates),
+				    #"Renamed Columns" = Table.RenameColumns(#"Converted to Table",{{"Name", "Currency"}, {"Value", "Rate"}}),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Rate", type number}})
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

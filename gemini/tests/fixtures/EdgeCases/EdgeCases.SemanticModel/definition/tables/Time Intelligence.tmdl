@@ -1,0 +1,38 @@
+table 'Time Intelligence'
+	lineageTag: 2572016a-df49-4899-b113-b6fb0805e6e2
+
+	calculationGroup
+		precedence: 10
+
+		calculationItem Current = SELECTEDMEASURE()
+
+		calculationItem YTD =
+					CALCULATE(
+					    SELECTEDMEASURE(),
+					    DATESYTD(LocalDateTable_5cb33fe7-583b-4a68-924e-fc66e315fc0e[Date])
+					)
+			ordinal: 1
+
+		calculationItem 'Prior Year' = CALCULATE(SELECTEDMEASURE(), SAMEPERIODLASTYEAR(LocalDateTable_5cb33fe7-583b-4a68-924e-fc66e315fc0e[Date]))
+			ordinal: 2
+
+	column 'Time Calculation'
+		dataType: string
+		lineageTag: 5a6a702a-4ca2-4d23-b095-f823e3be3a67
+		summarizeBy: none
+		sourceColumn: Name
+		sortByColumn: Ordinal
+
+		annotation SummarizationSetBy = Automatic
+
+	column Ordinal
+		dataType: int64
+		formatString: 0
+		lineageTag: 92ff8e51-967f-412a-a0e0-390a45df22b8
+		summarizeBy: sum
+		sourceColumn: Ordinal
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Time Intelligence' = calculationGroup
+

@@ -62,12 +62,37 @@ export function visualProjections(json) {
   return roles;
 }
 
-// data: bound to model fields, so the backend must answer a query for it.
+// Model fields used by formatting rather than query roles: a title or button
+// text bound to a measure, conditional formatting, dynamic reference lines.
+export function formattingFields(json) {
+  const found = [];
+  const seen = new Set();
+  const visit = (value, where, aliases = {}) => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) { value.forEach(item => visit(item, where, aliases)); return; }
+    // Saved filters (slicer selections) name tables through a From alias list.
+    if (Array.isArray(value.From)) aliases = { ...aliases, ...Object.fromEntries(value.From.filter(item => item?.Name && item?.Entity).map(item => [item.Name, item.Entity])) };
+    for (const key of ['Measure', 'Column', 'Aggregation', 'HierarchyLevel']) {
+      if (value[key] && typeof value[key] === 'object' && (value[key].Expression || value[key].Property)) {
+        const field = describeField({ [key]: value[key] }, aliases);
+        const id = `${where}|${field?.kind}|${field?.table}|${field?.name}`;
+        if (field && (field.table || field.name) && !seen.has(id)) { seen.add(id); found.push({ ...field, usedIn: where }); }
+        return;
+      }
+    }
+    for (const item of Object.values(value)) visit(item, where, aliases);
+  };
+  for (const [name, entries] of Object.entries(json?.visual?.objects ?? {})) visit(entries, `objects.${name}`);
+  for (const [name, entries] of Object.entries(json?.visual?.visualContainerObjects ?? {})) visit(entries, `visualContainerObjects.${name}`);
+  return found;
+}
+
+// data: bound to model fields (query roles or measure-driven formatting), so the backend must answer a query for it.
 // decorative: renders without data (textbox, image, shape, button, navigator).
 // group: a PBIR visualGroup container; its children are separate visuals.
 export function classifyVisual(json) {
   if (json?.visualGroup && !json?.visual) return 'group';
-  return Object.keys(visualProjections(json)).length ? 'data' : 'decorative';
+  return Object.keys(visualProjections(json)).length || formattingFields(json).length ? 'data' : 'decorative';
 }
 
 export function visualType(json) {

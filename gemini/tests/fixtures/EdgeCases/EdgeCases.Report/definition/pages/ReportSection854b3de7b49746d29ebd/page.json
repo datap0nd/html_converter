@@ -1,0 +1,15 @@
+﻿{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/page/2.1.0/schema.json",
+  "name": "ReportSection854b3de7b49746d29ebd",
+  "displayName": "Q&A <Ventes> \"été\"",
+  "displayOption": "FitToWidth",
+  "height": 900,
+  "width": 1280,
+  "visualInteractions": [
+    {
+      "source": "6bda22c060ddd052a206",
+      "target": "3df808dc86e4c9706b93",
+      "type": "NoFilter"
+    }
+  ]
+}

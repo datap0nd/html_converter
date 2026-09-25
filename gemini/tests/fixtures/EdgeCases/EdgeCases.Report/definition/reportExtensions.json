@@ -1,0 +1,24 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/reportExtension/1.0.0/schema.json",
+  "name": "extension",
+  "entities": [
+    {
+      "name": "Fact Sales",
+      "measures": [
+        {
+          "name": "Sales Label (report)",
+          "dataType": "Text",
+          "expression": "\"Sales: \" & FORMAT([Total], \"#,0\")",
+          "references": {
+            "measures": [
+              {
+                "entity": "Fact Sales",
+                "name": "Total"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

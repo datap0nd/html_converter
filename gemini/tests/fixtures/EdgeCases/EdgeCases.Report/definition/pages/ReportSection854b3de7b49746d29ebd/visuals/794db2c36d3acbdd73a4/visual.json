@@ -1,0 +1,16 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.7.0/schema.json",
+  "name": "794db2c36d3acbdd73a4",
+  "position": {
+    "x": 980,
+    "y": 160,
+    "z": 3000,
+    "height": 200,
+    "width": 280,
+    "tabOrder": 3000
+  },
+  "visualGroup": {
+    "displayName": "Nav <group> & 'buttons'",
+    "groupMode": "ScrollMode"
+  }
+}

@@ -1,0 +1,48 @@
+table 'Stores EU'
+	lineageTag: 3c11d695-64d2-4f58-9752-e4e4ff7f9a0e
+
+	column Store
+		dataType: string
+		lineageTag: 4270e08a-bf56-4eb8-8303-337d6fd06995
+		summarizeBy: none
+		sourceColumn: Store
+
+		annotation SummarizationSetBy = Automatic
+
+	column City
+		dataType: string
+		lineageTag: 28991ae3-a74c-4d11-bbd0-33e5c7560e2e
+		summarizeBy: none
+		sourceColumn: City
+
+		annotation SummarizationSetBy = Automatic
+
+	column Country
+		dataType: string
+		lineageTag: d8f49968-9d8a-4c50-9bbe-19385e8649ef
+		summarizeBy: none
+		sourceColumn: Country
+
+		annotation SummarizationSetBy = Automatic
+
+	column Opened
+		dataType: dateTime
+		formatString: Short Date
+		lineageTag: e807b6f4-913e-49ca-8dfc-f68ea90f9d7f
+		summarizeBy: none
+		sourceColumn: Opened
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Stores EU' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents("{{DATA_PATH:stores_eu.csv}}"),[Delimiter=";", Columns=4, Encoding=1252, QuoteStyle=QuoteStyle.None]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type with Locale" = Table.TransformColumnTypes(#"Promoted Headers", {{"Opened", type date}}, "fr-FR")
+				in
+				    #"Changed Type with Locale"
+
+	annotation PBI_ResultType = Table
+

@@ -1,0 +1,2 @@
+EVALUATE
+	SUMMARIZECOLUMNS('Fact Sales'[Channel], "Total", [Total])

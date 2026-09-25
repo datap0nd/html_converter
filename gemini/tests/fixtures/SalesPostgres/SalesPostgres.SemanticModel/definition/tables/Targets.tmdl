@@ -1,0 +1,47 @@
+table Targets
+	lineageTag: 4d9545f3-663f-4ae8-b8f2-7f0593f5d1a3
+
+	measure 'Target Amount' =
+			CALCULATE(
+			    SUM(Targets[target_amount]),
+			    TREATAS(VALUES(Orders[region_code]), Targets[region_code])
+			)
+		formatString: \$#,0;(\$#,0);\$#,0
+		lineageTag: 6be5e3cd-dbf4-48be-b4b8-870abdf0ea0b
+
+	column region_code
+		dataType: string
+		lineageTag: e60b8ba8-79c2-43dd-9def-7cbfcaf4640a
+		summarizeBy: none
+		sourceColumn: region_code
+
+		annotation SummarizationSetBy = Automatic
+
+	column target_month
+		dataType: dateTime
+		formatString: Short Date
+		lineageTag: a15355e5-c361-4a1d-83fe-40a7502679a3
+		summarizeBy: none
+		sourceColumn: target_month
+
+		annotation SummarizationSetBy = Automatic
+
+	column target_amount
+		dataType: decimal
+		lineageTag: b12340d1-b3fb-495f-9547-076645d8b0b1
+		summarizeBy: sum
+		sourceColumn: target_amount
+
+		annotation SummarizationSetBy = Automatic
+
+	partition Targets = m
+		mode: import
+		source =
+				let
+				    Source = Value.NativeQuery(PostgreSQL.Database("pg-host:5432", "analytics"), "select ""Region"" as region_code, target_month, target_amount#(lf)from planning.""MonthlyTargets""#(lf)where fiscal_year = 2025", null, [EnableFolding=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(Source,{{"target_month", type date}, {"target_amount", Currency.Type}})
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

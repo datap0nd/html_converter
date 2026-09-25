@@ -15,19 +15,31 @@ export function createSandbox({ fixture = 'SalesCsv', env = {} } = {}) {
   if (fs.existsSync(path.join(geminiDir, 'node_modules'))) fs.symlinkSync(path.join(geminiDir, 'node_modules'), path.join(dir, 'node_modules'), 'junction');
   const sourceData = path.join(dir, 'source-data') + path.sep;
   const source = path.join(fixturesDir, fixture);
-  fs.cpSync(path.join(source, 'data'), sourceData, { recursive: true });
+  const ownData = path.join(source, 'data');
+  // Report data lives outside input/, like a network share; fixtures may share tests/fixtures/data.
+  fs.cpSync(fs.existsSync(ownData) ? ownData : path.join(fixturesDir, 'data'), sourceData, { recursive: true });
   const input = path.join(dir, 'input');
-  fs.cpSync(source, input, { recursive: true, filter: file => !path.relative(source, file).replaceAll('\\', '/').startsWith('data') && !file.endsWith('README.md') });
+  fs.cpSync(source, input, { recursive: true, filter: file => { const rel = path.relative(source, file).replaceAll('\\', '/'); return rel !== 'data' && !rel.startsWith('data/') && rel !== 'README.md'; } });
+  // Paths are written as Power Query text (" doubled, #( escaped), and JSON-escaped inside .bim/.json.
+  const mText = value => value.replaceAll('"', '""').replaceAll('#(', '#(#)(');
   for (const file of walk(input)) {
-    if (!/\.(tmdl|json|pbir|pbism|pbip|bim)$/i.test(file)) continue;
+    if (!/\.(tmdl|json|pbir|pbism|pbip|bim|m|pq)$/i.test(file)) continue;
     const text = fs.readFileSync(file, 'utf8');
-    if (text.includes('{{DATA_DIR}}')) fs.writeFileSync(file, text.replaceAll('{{DATA_DIR}}', /\.bim$|\.json$/i.test(file) ? sourceData.replaceAll('\\', '\\\\') : sourceData));
+    if (!text.includes('{{DATA_')) continue;
+    const json = /\.(bim|json)$/i.test(file);
+    fs.writeFileSync(file, text.replace(/\{\{DATA_PATH:([^}]+)\}\}|\{\{DATA_DIR\}\}/g, (_all, name) => {
+      const value = mText(name ? path.join(sourceData, name) : sourceData);
+      return json ? JSON.stringify(value).slice(1, -1) : value;
+    }));
   }
   // Desktop leaves these next to the report; the converter must never stage them.
-  const pbi = path.join(input, `${fixture}.Report`, '.pbi');
-  fs.mkdirSync(pbi, { recursive: true });
-  fs.writeFileSync(path.join(pbi, 'localSettings.json'), '{"version":"1.0","remoteArtifacts":[]}');
-  fs.writeFileSync(path.join(pbi, 'cache.abf'), 'not a real cache');
+  const reportFolder = fs.readdirSync(input).find(name => name.endsWith('.Report'));
+  if (reportFolder) {
+    const pbi = path.join(input, reportFolder, '.pbi');
+    fs.mkdirSync(pbi, { recursive: true });
+    fs.writeFileSync(path.join(pbi, 'localSettings.json'), '{"version":"1.0","remoteArtifacts":[]}');
+    fs.writeFileSync(path.join(pbi, 'cache.abf'), 'not a real cache');
+  }
   fs.writeFileSync(path.join(dir, '.env'), Object.entries({ PG_ALLOW_NATIVE_QUERIES: 'false', ...env }).map(([key, value]) => `${key}=${value}`).join('\n') + '\n');
   return {
     dir,

@@ -1,0 +1,68 @@
+table Product
+	lineageTag: 50dbfce5-8e6a-45b3-8d1b-aaaeca3ba13a
+
+	column ProductKey
+		dataType: int64
+		formatString: 0
+		lineageTag: c79c6efd-1d1e-4855-ac53-23e454872776
+		summarizeBy: none
+		sourceColumn: ProductKey
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Product Name'
+		dataType: string
+		lineageTag: 09bd3e5d-8225-41ee-8bb4-366b82bab39b
+		summarizeBy: none
+		sourceColumn: Product Name
+
+		annotation SummarizationSetBy = Automatic
+
+	column Category
+		dataType: string
+		lineageTag: cb777dff-cac9-48c0-b2b0-588c10c246cc
+		summarizeBy: none
+		sourceColumn: Category
+
+		annotation SummarizationSetBy = Automatic
+
+	column Subcategory
+		dataType: string
+		lineageTag: 51b1e0d9-12fb-4ab4-8378-fc80baaa04a5
+		summarizeBy: none
+		sourceColumn: Subcategory
+
+		annotation SummarizationSetBy = Automatic
+
+	column Color
+		dataType: string
+		lineageTag: b9f0c16f-604e-47bd-88ba-66658d80eea8
+		summarizeBy: none
+		sourceColumn: Color
+
+		annotation SummarizationSetBy = Automatic
+
+	column StandardCost
+		dataType: double
+		formatString: \$#,0.00;(\$#,0.00);\$#,0.00
+		lineageTag: a51a4024-2da4-4eda-9128-5400aba3f541
+		summarizeBy: sum
+		sourceColumn: StandardCost
+
+		annotation SummarizationSetBy = Automatic
+
+	partition Product = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents("{{DATA_PATH:products.csv}}"),[Delimiter=",", Columns=6, Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers",{{"ProductKey", Int64.Type}, {"Product Name", type text}, {"Category", type text}, {"Subcategory", type text}, {"Color", type text}, {"StandardCost", type number}}),
+				    #"Trimmed Text" = Table.TransformColumns(#"Changed Type",{{"Product Name", Text.Trim, type text}})
+				in
+				    #"Trimmed Text"
+
+	annotation PBI_NavigationStepName = Navigation
+
+	annotation PBI_ResultType = Table
+

@@ -1,0 +1,69 @@
+table DateTableTemplate_89c70cfd-a455-4eb5-8b9e-1c3b268b3b6f
+	isHidden
+	showAsVariationsOnly
+	lineageTag: 75d7dfcd-4651-4d6e-8e76-1f3bb50445a7
+
+	column Date
+		dataType: dateTime
+		isHidden
+		lineageTag: 96608211-cf51-4420-b0cb-d91c209c4c81
+		dataCategory: PaddedDateTableDates
+		summarizeBy: none
+		isNameInferred
+		sourceColumn: [Date]
+
+		annotation SummarizationSetBy = User
+
+	column Year = YEAR([Date])
+		dataType: int64
+		isHidden
+		lineageTag: 9564b19a-52f6-4375-aabf-62da2118dd5d
+		dataCategory: Years
+		summarizeBy: none
+
+		annotation SummarizationSetBy = User
+
+		annotation TemplateId = Year
+
+	column MonthNo = MONTH([Date])
+		dataType: int64
+		isHidden
+		lineageTag: fc6201dd-b036-475b-a880-8a0c25b4c958
+		dataCategory: MonthOfYear
+		summarizeBy: none
+
+		annotation SummarizationSetBy = User
+
+		annotation TemplateId = MonthNumber
+
+	column Month = FORMAT([Date], "MMMM")
+		dataType: string
+		isHidden
+		lineageTag: 74f4e216-e2e7-4dbc-bb29-7e20d71d1e62
+		dataCategory: Months
+		summarizeBy: none
+		sortByColumn: MonthNo
+
+		annotation SummarizationSetBy = User
+
+		annotation TemplateId = Month
+
+	hierarchy 'Date Hierarchy'
+		lineageTag: e904b0c1-c21b-411d-bc92-6af07d93987c
+
+		level Year
+			lineageTag: b3f07a2f-d40c-4173-b049-6da37f059ccf
+			column: Year
+
+		level Month
+			lineageTag: 4368ec0d-b8dc-4197-bea4-e881e7093628
+			column: Month
+
+		annotation TemplateId = DateHierarchy
+
+	partition DateTableTemplate_89c70cfd-a455-4eb5-8b9e-1c3b268b3b6f = calculated
+		mode: import
+		source = Calendar(Date(2015,1,1), Date(2015,1,1))
+
+	annotation __PBI_TemplateDateTable = true
+

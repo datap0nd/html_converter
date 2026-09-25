@@ -1,0 +1,37 @@
+table 'Customer''s Region'
+	lineageTag: 7556dfca-455b-4e04-ad57-b502c6850cbe
+
+	measure 'Region Count' = DISTINCTCOUNT('Customer''s Region'[Region Code])
+		formatString: 0
+		lineageTag: 776d2ba9-bff8-4d6b-a425-7eed6b9cbe4c
+
+	column 'Region Code'
+		dataType: string
+		lineageTag: 2d28cf76-8e57-4432-9612-0c8904c86888
+		summarizeBy: none
+		sourceColumn: Region Code
+
+		annotation SummarizationSetBy = Automatic
+
+	column Region
+		dataType: string
+		lineageTag: c433c9be-2b1a-4dae-b28a-42f8079ddbfb
+		summarizeBy: none
+		sourceColumn: Region
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Customer''s Region' = m
+		mode: import
+		source =
+				let
+				    Source = PostgreSQL.Database(PgServer, PgDatabase),
+				    ref_customer_region = Source{[Schema="ref",Item="customer_region"]}[Data],
+				    #"Renamed Columns" = Table.RenameColumns(ref_customer_region,{{"region_code", "Region Code"}, {"region_name", "Region"}})
+				in
+				    #"Renamed Columns"
+
+	annotation PBI_NavigationStepName = Navigation
+
+	annotation PBI_ResultType = Table
+
