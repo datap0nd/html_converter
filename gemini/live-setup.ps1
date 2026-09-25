@@ -166,13 +166,14 @@ try {
             Write-Host 'What should this run convert?' -ForegroundColor Cyan
             Write-Host '  [1] First 2 report pages, end to end (test)' -ForegroundColor Green
             Write-Host '  [2] All report pages, end to end'
+            Write-Host '  [3] Self-test this PC (no Gemini quota, no report data; about 1 minute)'
             do {
-                $choice = Read-Host 'Choose 1 or 2 [default: 1]'
+                $choice = Read-Host 'Choose 1, 2 or 3 [default: 1]'
                 if ([string]::IsNullOrWhiteSpace($choice)) { $choice = '1' }
-            } until ($choice -in @('1', '2'))
-            $SelectedPageScope = if ($choice -eq '1') { 'First2' } else { 'All' }
+            } until ($choice -in @('1', '2', '3'))
+            $SelectedPageScope = switch ($choice) { '1' { 'First2' } '2' { 'All' } default { 'SelfTest' } }
         }
-        if ($SelectedPageScope -notin @('First2', 'All')) { throw 'HC_PAGE_SCOPE must be First2 or All.' }
+        if ($SelectedPageScope -notin @('First2', 'All', 'SelfTest')) { throw 'HC_PAGE_SCOPE must be First2, All, or SelfTest.' }
         Write-Host "Selected conversion scope: $SelectedPageScope" -ForegroundColor Cyan
     }
     Write-Host "html_converter live setup: $GeminiDir" -ForegroundColor Cyan
@@ -245,16 +246,23 @@ try {
         Write-Host 'Progress is printed live below and saved under gemini\logs.' -ForegroundColor DarkGray
         $converterArgs = @('--no-warnings', (Join-Path (Join-Path $GeminiDir 'scripts') 'start-live-report.mjs'))
         if ($SelectedPageScope -eq 'First2') { $converterArgs += @('--page-limit', '2') }
+        if ($SelectedPageScope -eq 'SelfTest') {
+            Write-Host 'Running the offline self-test with this PC''s Node.js and Gemini CLI against a mock Gemini API...' -ForegroundColor Cyan
+            $converterArgs = @('--no-warnings', (Join-Path (Join-Path $GeminiDir 'scripts') 'selftest.mjs'))
+        }
         Push-Location $GeminiDir
         try {
             $converterExit = Invoke-NativeLogged -FilePath $nodePath -Arguments $converterArgs
         } finally { Pop-Location }
         # 130 / 0xC000013A: the report server was stopped with Ctrl+C.
-        if ($converterExit -in @(130, -1073741510, 3221225786)) {
+        if ($SelectedPageScope -eq 'SelfTest' -and $converterExit -eq 0) {
+            Write-Host 'Self-test passed. Run .\setup.ps1 again and choose 1 or 2 to convert your report.' -ForegroundColor Green
+        } elseif ($converterExit -in @(130, -1073741510, 3221225786)) {
             Write-Host 'Report server stopped.' -ForegroundColor Cyan
         } elseif ($converterExit -ne 0) {
             $latest = Join-Path (Join-Path $GeminiDir 'logs') 'latest-converter-log.txt'
             $logHint = if (Test-Path -LiteralPath $latest) { " Converter log: $((Get-Content -LiteralPath $latest -TotalCount 1).Trim())" } else { '' }
+            if ($SelectedPageScope -eq 'SelfTest') { throw "Self-test failed (exit code $converterExit). The lines above show which step failed; logs are under gemini\logs\selftest-*." }
             throw "Report conversion stopped (exit code $converterExit). The reason and what to do are printed above.$logHint"
         }
     }

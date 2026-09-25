@@ -132,6 +132,15 @@ export function stagedInputAllowed(relativePath) {
 
 const STAGE_PREFIX = 'html-converter-gemini-';
 
+export const STAGE_SETTINGS = {
+  tools: { core: ['list_directory', 'read_file', 'grep_search', 'search_file_content', 'glob', 'write_file', 'replace'], useRipgrep: false },
+  mcp: { allowed: ['html-converter-no-mcp-servers'] },
+  general: { plan: { enabled: false }, checkpointing: { enabled: false } },
+  ui: { showCompatibilityWarnings: false },
+  privacy: { usageStatisticsEnabled: false },
+  context: { fileFiltering: { respectGitIgnore: false, respectGeminiIgnore: true } }
+};
+
 function createGeminiWorkspace(inventory, scope) {
   const stage = fs.mkdtempSync(path.join(os.tmpdir(), STAGE_PREFIX));
   for (const folder of ['input', 'work', 'prompts', 'skills', 'scripts', 'output/dynamic']) fs.mkdirSync(path.join(stage, folder), { recursive: true });
@@ -153,6 +162,11 @@ function createGeminiWorkspace(inventory, scope) {
     }
   });
   for (const name of ['inventory.json', 'report-digest.json', 'live-run.json']) fs.copyFileSync(path.join(scope.workDir, name), path.join(stage, 'work', name));
+  // Applied because the child runs with GEMINI_CLI_TRUST_WORKSPACE=true. Only file tools are
+  // offered, which also removes enter_plan_mode (after it every write is denied), web access,
+  // subagents, and the user's MCP servers. Unknown keys are ignored by older CLI versions.
+  fs.mkdirSync(path.join(stage, '.gemini'), { recursive: true });
+  fs.writeFileSync(path.join(stage, '.gemini', 'settings.json'), JSON.stringify(STAGE_SETTINGS, null, 2) + '\n');
   for (const canonical of ['work/live-interpretation.json', 'work/live-build.json', 'work/live-review.json', 'work/live-final-review.json', 'output/dynamic/index.html', 'output/dynamic/backend.mjs']) {
     const source = persistedPath(scope, canonical);
     if (fs.existsSync(source)) fs.copyFileSync(source, path.join(stage, canonical));
@@ -183,6 +197,23 @@ function removeStaleWorkspaces() {
   }
 }
 
+// Gemini CLI writes gemini-client-error-*.json (with conversation history, i.e. report
+// content) to the temp folder on API errors and never deletes them. Keep them with the run.
+function collectClientErrorReports(since, runDir, label) {
+  let entries = [];
+  try { entries = fs.readdirSync(os.tmpdir()).filter(name => /^gemini-client-error-.*\.json$/.test(name)); } catch { return; }
+  for (const name of entries) {
+    const file = path.join(os.tmpdir(), name);
+    try {
+      if (fs.statSync(file).mtimeMs < since - 1000) continue;
+      const target = path.join(runDir, `${label}.${name}`);
+      fs.copyFileSync(file, target);
+      fs.rmSync(file, { force: true });
+      log.info('gemini', `Gemini API error report saved: ${rel(target)}`);
+    } catch { /* another process may own it */ }
+  }
+}
+
 function preserveStage(stage, runDir, name) {
   const target = path.join(runDir, `${name}-workspace`);
   for (const folder of ['work', 'output']) {
@@ -197,8 +228,7 @@ export function geminiFailureDetail(result, env = {}) {
   const stderr = result.stderr ?? result.stderrTail ?? '';
   try { parsed = JSON.parse(stdout); } catch {}
   const streamError = result.finalResult?.error?.message;
-  const noise = /^.*(?:256-color support not detected|terminal with at least 256-color).*$/gim;
-  const cleanStderr = stderr.replace(noise, '').trim();
+  const cleanStderr = stderr.split(/\r?\n/).filter(line => !STDERR_NOISE.test(line) && !/^\s+at\s/.test(line)).join('\n').trim();
   const message = parsed?.error?.message || parsed?.error?.details || streamError || cleanStderr || stdout.trim() || stderr.trim() || result.error?.message || 'No diagnostic text from Gemini CLI.';
   let detail = typeof message === 'string' ? message : JSON.stringify(message);
   for (const [key, value] of Object.entries(env)) {
@@ -213,7 +243,7 @@ function geminiFailureText(result) {
 
 export function isTransientGeminiFailure(result) {
   const detail = geminiFailureText(result);
-  return Number(result?.status) === 429 || /\b429\b|RESOURCE_EXHAUSTED|MODEL_CAPACITY_EXHAUSTED|rate[ -]?limit|too many requests|high demand|no capacity available|\b503\b|UNAVAILABLE|overloaded|\b500\b INTERNAL|ECONNRESET|socket hang up/i.test(detail);
+  return [429, 173, 500, 244, 502, 246, 503, 247, 504, 248].includes(Number(result?.status)) || /\b429\b|RESOURCE_EXHAUSTED|MODEL_CAPACITY_EXHAUSTED|rate[ -]?limit|too many requests|high demand|no capacity available|\b503\b|UNAVAILABLE|overloaded|\b500\b INTERNAL|ECONNRESET|socket hang up/i.test(detail);
 }
 
 export function geminiRetryDelayMs(result, failedAttempt) {
@@ -230,6 +260,10 @@ export function diagnoseGeminiFailure(result) {
   if (result?.error?.code === 'ENOENT' || /is not recognized as an internal or external command|command not found/i.test(text)) return { kind: 'missing-cli', retry: false, hint: 'Gemini CLI is not installed or not on PATH. Run: npm install -g @google/gemini-cli   then open a new PowerShell window and rerun .\\setup.ps1.' };
   if (Number(result?.status) === 41 || /FatalAuthenticationError|UNAUTHENTICATED|API key not valid|invalid api key|Please set an Auth method|auth(?:entication)? (?:failed|required)|login required|oauth|PERMISSION_DENIED/i.test(text)) return { kind: 'auth', retry: false, hint: `Gemini CLI could not authenticate. ${signIn}` };
   if (/models\/[\w.-]+ is not found|model[^\n]{0,40}not found|NOT_FOUND|not supported for generateContent|Requested entity was not found/i.test(text)) return { kind: 'model', retry: false, hint: `The pinned model ${MODEL} is not available to this Google account or Gemini CLI version. Update the CLI with: npm install -g @google/gemini-cli@latest   and check the account has access to ${MODEL}.` };
+  if (Number(result?.status) === 52 || /Please fix the configuration|is not valid JSON|Invalid configuration in/i.test(text)) return { kind: 'config', retry: false, hint: 'A Gemini CLI settings file is invalid. Open the file named above (usually %USERPROFILE%\\.gemini\\settings.json), fix the JSON error, and save it as UTF-8 WITHOUT a byte-order mark (Windows PowerShell 5.1 Set-Content -Encoding UTF8 adds one). Then rerun .\\setup.ps1.' };
+  if (Number(result?.status) === 55 || /not running in a trusted directory/i.test(text)) return { kind: 'trust', retry: false, hint: 'Gemini CLI refused the temporary folder as untrusted. Update Gemini CLI (npm install -g @google/gemini-cli@latest); if your organization enforces folder trust, ask IT to allow the %TEMP% folder.' };
+  if ([400, 144].includes(Number(result?.status)) || /INVALID_ARGUMENT/.test(text)) return { kind: 'request', retry: false, hint: 'The Gemini API rejected the request (HTTP 400). The message above says why; if it mentions the API key, set a valid GEMINI_API_KEY or sign in again with gemini.' };
+  if ([403, 147].includes(Number(result?.status))) return { kind: 'auth', retry: false, hint: `The Gemini API refused access (HTTP 403): the account/project may lack access to ${MODEL} or the API is disabled. ${signIn}` };
   if (/UNABLE_TO_GET_ISSUER_CERT_LOCALLY|SELF_SIGNED_CERT|unable to verify the first certificate|certificate/i.test(text)) return { kind: 'network', retry: false, hint: 'Gemini CLI does not trust the corporate proxy certificate. Before running setup, in the same PowerShell window run: $env:NODE_EXTRA_CA_CERTS = "C:\\path\\to\\corporate-root-ca.pem"   (ask IT for the file).' };
   if (/ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNREFUSED|ENETUNREACH|fetch failed|getaddrinfo|proxy/i.test(text)) return { kind: 'network', retry: true, hint: 'Gemini CLI could not reach Google. Check VPN/Internet. Behind a proxy, set $env:HTTPS_PROXY = "http://proxy:port" in the same PowerShell window before running setup.' };
   if (isTransientGeminiFailure(result)) return { kind: 'quota', retry: true, hint: 'Gemini rate limit or capacity error. Wait a few minutes and rerun .\\setup.ps1; completed phases are kept.' };
@@ -288,7 +322,7 @@ export function validateLiveReport(inventory, markup, review, env = {}) {
 
 // ---------- live narration of a Gemini phase ----------
 
-const STDERR_NOISE = /256-color support not detected|terminal with at least 256-color|Loaded cached credentials|^\s*$|DeprecationWarning|ExperimentalWarning|--trace-deprecation|--trace-warnings/i;
+const STDERR_NOISE = /256-color support not detected|terminal with at least 256-color|True color \(24-bit\) support|Windows 10 detected|Ripgrep is not available|^\[STARTUP\]|Loaded cached credentials|^\s*$|DeprecationWarning|ExperimentalWarning|--trace-deprecation|--trace-warnings|punycode/i;
 
 function createNarrator(name, settings) {
   let text = '';
@@ -321,8 +355,11 @@ function createNarrator(name, settings) {
       }
     },
     onStderr(line) {
-      if (STDERR_NOISE.test(line)) log.detail(name, `Gemini CLI stderr: ${line}`);
-      else log.info(name, `Gemini CLI: ${line}`);
+      if (STDERR_NOISE.test(line) || /^\s+at\s|^\s*[{}\]]|^\s+"/.test(line)) { log.detail(name, `Gemini CLI stderr: ${line}`); return; }
+      log.detail(name, `Gemini CLI stderr: ${line}`);
+      const retry = /^Attempt (\d+) failed(?: with status (\d+))?/.exec(line);
+      if (retry) { log.warn(name, `Gemini API request failed${retry[2] ? ` (HTTP ${retry[2]})` : ''}; Gemini CLI is retrying on its own (attempt ${retry[1]} of up to 10).`); return; }
+      log.info(name, `Gemini CLI: ${line.length > 300 ? `${line.slice(0, 297)}...` : line}`);
     },
     onText(line) {
       log.info(name, `Gemini CLI: ${line.length > 300 ? `${line.slice(0, 297)}...` : line}`);
@@ -370,13 +407,16 @@ async function runPhase([name, promptFile, expectedFile], ctx) {
     } else if (outputsEdited(name)) {
       for (const file of ['index.html', 'backend.mjs']) fs.copyFileSync(path.join(scope.dynamicDir, file), path.join(stage, 'output', 'dynamic', file));
     }
-    const repairInstruction = attempt > 1 && missing.length ? ` A previous attempt ended without producing these required files: ${missing.join(', ')}. Complete the phase and write every required file now.` : '';
+    const lastProblem = result?.events?.filter(event => event.type === 'error' || (event.type === 'tool_result' && event.summary)).map(event => event.summary).at(-1);
+    const repairInstruction = attempt > 1 && missing.length ? ` A previous attempt ended without producing these required files: ${missing.join(', ')}${lastProblem ? ` (it ended with: ${lastProblem.slice(0, 200)})` : ''}. Do not repeat identical tool calls and do not switch to plan mode. Write every required file now with write_file.` : '';
     const args = ['--model', MODEL, ...(cli.skipTrust ? ['--skip-trust'] : []), '-e', 'none', '--approval-mode', 'auto_edit', '--output-format', cli.outputFormat, '-p', prompt + repairInstruction];
     const label = `${name}.attempt-${attempt}`;
     log.info(name, `Attempt ${attempt} of ${settings.maxAttempts}: Gemini ${MODEL} running. Live transcript: ${rel(path.join(runDir, `${label}.events.jsonl`))}`);
     const narrator = createNarrator(name, settings);
+    const attemptStarted = Date.now();
     result = await runGeminiStream(args, {
       cwd: stage,
+      env: { GEMINI_DEBUG_LOG_FILE: path.join(runDir, `${label}.gemini-debug.log`) },
       timeoutMs: Math.min(settings.attemptMs, remainingMs),
       idleTimeoutMs: settings.idleMs,
       eventsFile: path.join(runDir, `${label}.events.jsonl`),
@@ -388,6 +428,7 @@ async function runPhase([name, promptFile, expectedFile], ctx) {
       onPrompt: text => log.error(name, `Gemini CLI is waiting for keyboard input that this unattended run cannot give: "${text}"`)
     });
     narrator.flush();
+    collectClientErrorReports(attemptStarted, runDir, label);
     log.info(name, `Attempt ${attempt} ended after ${formatDuration(result.durationMs)} (exit ${result.status ?? result.signal ?? 'none'}${result.error ? `: ${result.error.message}` : ''}).`);
 
     const flag = unsupportedFlag(result);
@@ -711,7 +752,8 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
   const backendFile = path.join(scope.dynamicDir, 'backend.mjs');
   fs.mkdirSync(scope.dynamicDir, { recursive: true });
   const settings = phaseSettings(env, scope);
-  const cli = { outputFormat: 'stream-json', skipTrust: true };
+  // Trust comes from GEMINI_CLI_TRUST_WORKSPACE; the --skip-trust flag does not load workspace settings.
+  const cli = { outputFormat: 'stream-json', skipTrust: false };
   let checked = null;
 
   if (invokeGemini) {

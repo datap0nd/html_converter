@@ -342,6 +342,31 @@ test('staged workspace never contains .env, data exports, caches, or cultures', 
   assert.match(log, /Temporary Gemini workspace/);
 }));
 
+function runSelftest(extraArgs, env = {}) {
+  return new Promise(resolve => {
+    const child = spawn(process.execPath, [path.join(geminiDir, 'scripts', 'selftest.mjs'), ...extraArgs], { cwd: geminiDir, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '';
+    child.stdout.on('data', chunk => { output += chunk; });
+    child.stderr.on('data', chunk => { output += chunk; });
+    child.on('close', code => resolve({ code, output }));
+  });
+}
+
+test('self-test passes with the built-in fake CLI', async () => {
+  const result = await runSelftest(['--fake-cli']);
+  assert.equal(result.code, 0, result.output);
+  assert.match(result.output, /PASSED/);
+});
+
+// Set HC_TEST_GEMINI_BUNDLE to an installed @google/gemini-cli bundle/gemini.js to run the REAL CLI offline.
+test('self-test passes with the real Gemini CLI against the mock API', { skip: !process.env.HC_TEST_GEMINI_BUNDLE }, async () => {
+  const result = await runSelftest(['--scenario', 'api-429-02,broken-backend'], { HC_GEMINI_ENTRY: process.env.HC_TEST_GEMINI_BUNDLE });
+  assert.equal(result.code, 0, result.output);
+  assert.match(result.output, /Gemini CLI is retrying on its own/);
+  assert.match(result.output, /Asking Gemini to fix 1 issue/);
+  assert.match(result.output, /PASSED/);
+});
+
 test('Windows-only: PowerShell setup scripts parse', { skip: !hasPwsh() }, () => {
   for (const file of ['setup.ps1', 'live-setup.ps1', 'tests/setup.test.ps1']) {
     const output = execFileSync('pwsh', ['-NoProfile', '-Command', `$t=$null;$e=$null;[System.Management.Automation.Language.Parser]::ParseFile('${path.join(geminiDir, file)}',[ref]$t,[ref]$e)|Out-Null;$e.Count`], { encoding: 'utf8' }).trim();

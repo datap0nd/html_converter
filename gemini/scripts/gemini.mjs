@@ -76,8 +76,15 @@ function packageVersion(entry) {
   return null;
 }
 
+// Headless behaviour verified against Gemini CLI 0.61.0:
+// - NO_RELAUNCH keeps one process (the relauncher ignores SIGTERM and orphans its worker on kill);
+// - TRUST_WORKSPACE applies the staged .gemini/settings.json (--skip-trust does not) and works on 0.40+;
+// - NO_BROWSER turns an expired Google sign-in into exit 41 instead of an unanswerable [Y/n] prompt;
+// - COLORTERM removes the "256-color support not detected" warning (NO_COLOR does not).
+export const HEADLESS_ENV = { GEMINI_CLI_NO_RELAUNCH: 'true', GEMINI_CLI_TRUST_WORKSPACE: 'true', NO_BROWSER: 'true', COLORTERM: 'truecolor', NO_COLOR: '1' };
+
 export function geminiChildEnv(extra = {}, base = process.env) {
-  const childEnv = { ...base, NO_COLOR: '1', ...extra };
+  const childEnv = { ...base, ...HEADLESS_ENV, ...extra };
   // The model may need its own auth, but must never inherit source credentials.
   for (const key of Object.keys(childEnv)) {
     if (GEMINI_ENV.test(key)) continue;
@@ -90,7 +97,8 @@ function invocation(args, options = {}) {
   const env = geminiChildEnv(options.env);
   const info = options.cli ?? geminiCliInfo(env);
   const common = { cwd: options.cwd, env, windowsHide: true };
-  if (info.prefix) return { command: info.command, args: [...info.prefix, ...args], common, info };
+  // Without the relauncher, raise the heap limit the way it would have.
+  if (info.prefix) return { command: info.command, args: [...(info.command === process.execPath && info.prefix.length ? ['--max-old-space-size=4096'] : []), ...info.prefix, ...args], common, info };
   // npm installs Gemini CLI as gemini.cmd on Windows. Invoke cmd explicitly;
   // Node 22+/24 deprecates passing an args array with shell:true.
   const encoded = args.map(value => {
