@@ -4,7 +4,8 @@ import os from 'node:os';
 import { createHash } from 'node:crypto';
 import vm from 'node:vm';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { root, inputDir, workDir, dynamicDir, discover, checkSourceAvailability, writeJson, readJson } from './core.mjs';
+import { root, inputDir, workDir, dynamicDir, discover, checkSourceAvailability, parseSourceMap, applySourceMap, writeJson, readJson } from './core.mjs';
+import { inspectWorkbook, excelErrorHint } from './excel.mjs';
 import { loadLocalEnv } from './env.mjs';
 import { runGeminiStream, geminiCliInfo, toolTarget, unsupportedFlag, formatBytes } from './gemini.mjs';
 import { inputFingerprint, captureArtifacts, artifactsMatch, saveCheckpoint } from './checkpoints.mjs';
@@ -650,13 +651,15 @@ export function scopeFingerprint(inputHash, inventory) {
 
 // ---------- preflight ----------
 
-const DRIVERLESS_CONNECTORS = /\b(Sql\.Databases?|Oracle\.Database|MySQL\.Database|Odbc\.(?:DataSource|Query)|OleDb\.(?:DataSource|Query)|Excel\.Workbook|AnalysisServices\.Databases?|PowerBI\.Dataflows|PowerPlatform\.Dataflows|Snowflake\.Databases|GoogleBigQuery\.Database|Databricks\.Catalogs|Lakehouse\.Contents|Fabric\.[A-Za-z]+|SharePoint\.(?:Files|Contents|Tables)|AzureStorage\.[A-Za-z]+)\s*\(/g;
+const DRIVERLESS_CONNECTORS = /\b(Sql\.Databases?|Oracle\.Database|MySQL\.Database|Odbc\.(?:DataSource|Query)|OleDb\.(?:DataSource|Query)|AnalysisServices\.Databases?|PowerBI\.Dataflows|PowerPlatform\.Dataflows|Snowflake\.Databases|GoogleBigQuery\.Database|Databricks\.Catalogs|Lakehouse\.Contents|Fabric\.[A-Za-z]+|SharePoint\.(?:Files|Contents|Tables)|AzureStorage\.[A-Za-z]+)\s*\(/g;
 
-export function scopedConnectors(digest) {
+// skipQueries: queries whose SharePoint/cloud reads were all mapped to local copies (HC_SOURCE_MAP).
+export function scopedConnectors(digest, { skipQueries = new Set() } = {}) {
   const found = new Map();
-  const scan = (text, where) => {
+  const scan = (text, where, query) => {
     const code = String(text ?? '').replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
     for (const match of code.matchAll(DRIVERLESS_CONNECTORS)) {
+      if (skipQueries.has(query) && /^(?:SharePoint\.(?:Files|Contents)|AzureStorage\.)/.test(match[1])) continue;
       const list = found.get(match[1]) ?? new Set();
       list.add(where);
       found.set(match[1], list);
@@ -665,9 +668,9 @@ export function scopedConnectors(digest) {
   // Tables pulled in only by a relationship hop do not block: the selected visuals do not read them.
   for (const table of digest.model?.tables ?? []) {
     if (table.scope === 'related-by-relationship') continue;
-    for (const partition of table.partitions ?? []) if (partition.type !== 'calculated') scan(Array.isArray(partition.source) ? partition.source.join('\n') : partition.source, `table ${table.name}`);
+    for (const partition of table.partitions ?? []) if (partition.type !== 'calculated') scan(Array.isArray(partition.source) ? partition.source.join('\n') : partition.source, `table ${table.name}`, table.name);
   }
-  for (const expression of digest.model?.expressions ?? []) scan(Array.isArray(expression.expression) ? expression.expression.join('\n') : expression.expression, `query ${expression.name}`);
+  for (const expression of digest.model?.expressions ?? []) scan(Array.isArray(expression.expression) ? expression.expression.join('\n') : expression.expression, `query ${expression.name}`, expression.name);
   return [...found.entries()].map(([connector, where]) => ({ connector, usedBy: [...where] }));
 }
 
@@ -679,23 +682,51 @@ async function preflight(inventory, digest, env) {
   const hasAuth = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_GENAI_USE_VERTEXAI || fs.existsSync(path.join(home, '.gemini', 'oauth_creds.json')) || fs.existsSync(path.join(home, '.gemini', 'settings.json'));
   if (!hasAuth) log.warn('preflight', 'No Gemini sign-in was found (no GEMINI_API_KEY and no ~/.gemini credentials). If the first phase stops at a sign-in prompt, run gemini once in PowerShell to sign in.');
 
-  const blocking = scopedConnectors(digest);
+  const scopedFiles = new Set((digest.model?.tables ?? []).map(table => table.source).concat((digest.model?.expressions ?? []).map(item => item.source)));
+  // Queries the selected visuals read directly (tables pulled in only by a relationship hop only warn).
+  const directQueries = new Set((digest.model?.tables ?? []).filter(table => table.scope !== 'related-by-relationship').map(table => table.name).concat((digest.model?.expressions ?? []).map(item => item.name)));
+  // A read (remote file, Excel.Workbook call) belongs to its query; a file source to every query and model file that reads it.
+  const readsInScope = item => !scopedFiles.size || (item.query != null ? directQueries.has(item.query) || (item.originQuery != null && directQueries.has(item.originQuery)) : [item.referencedBy, ...(item.alsoReferencedBy ?? [])].some(file => scopedFiles.has(file)));
+  const sourceInScope = source => !scopedFiles.size || [source.referencedBy, ...(source.alsoReferencedBy ?? [])].some(file => scopedFiles.has(file)) || [source.query, ...(source.excel?.items ?? []).map(item => item.query)].some(name => name != null && directQueries.has(name));
+  const needsSignIn = read => read.connector !== 'Web.Contents' || /sharepoint\.|onedrive|1drv\.ms|\.blob\.core\.windows\.net|\.dfs\.core\.windows\.net/i.test(read.url ?? '');
+  const remote = (inventory.remoteReads ?? []).filter(read => !read.mappedTo && needsSignIn(read) && readsInScope(read));
+  if (remote.length && env.HC_ALLOW_UNSUPPORTED_CONNECTORS !== 'true') {
+    const example = remote.find(read => read.url) ?? remote[0];
+    const fileName = example.url && !example.fileUnknown ? decodeURIComponent(example.url.split(/[\\/]/).pop() ?? '') : '<file name>';
+    throw new ConversionError(`The selected pages read ${remote.length === 1 ? 'a file' : `${remote.length} files`} from SharePoint/OneDrive or cloud storage, which this converter cannot sign in to: ${remote.slice(0, 4).map(read => `${read.reader} of ${read.url ?? `a ${read.connector} source`} (${read.query ?? read.referencedBy})`).join('; ')}.`, { phase: 'preflight', hint: `Put the file on this PC and tell the converter where it is: sync the SharePoint/OneDrive library (the Sync button in the browser) or download the file, then add one line per file or folder to gemini/.env, for example:  HC_SOURCE_MAP_1=${example.url ?? '<URL from the PBIP>'} => C:\\Users\\<you>\\<synced folder>\\${fileName}   (a folder URL maps everything below it), and rerun .\\setup.ps1. Nothing was sent to Gemini yet.` });
+  }
+  const mappedQueries = new Set((inventory.remoteReads ?? []).filter(read => read.mappedTo).flatMap(read => [read.query, read.originQuery]).filter(name => name != null));
+  const skipQueries = new Set([...mappedQueries].filter(name => !(inventory.remoteReads ?? []).some(read => !read.mappedTo && (read.query === name || read.originQuery === name))));
+  const blocking = scopedConnectors(digest, { skipQueries });
   for (const table of (digest.model?.tables ?? []).filter(item => item.scope === 'related-by-relationship')) {
     const text = (table.partitions ?? []).map(partition => Array.isArray(partition.source) ? partition.source.join('\n') : partition.source ?? '').join('\n');
-    const connector = /\b(Sql\.Databases?|Oracle\.Database|MySQL\.Database|Odbc\.\w+|OleDb\.\w+|Excel\.Workbook|SharePoint\.\w+|AnalysisServices\.\w+)\s*\(/.exec(text)?.[1];
-    if (connector) log.warn('preflight', `Table ${table.name} is related to the selected visuals but reads ${connector}, which cannot be read live; filters that flow through it may not be reproduced.`);
+    const connector = /\b(Sql\.Databases?|Oracle\.Database|MySQL\.Database|Odbc\.\w+|OleDb\.\w+|SharePoint\.\w+|AnalysisServices\.\w+)\s*\(/.exec(text)?.[1];
+    if (connector && !(skipQueries.has(table.name) && /^SharePoint\.(?:Files|Contents)$/.test(connector))) log.warn('preflight', `Table ${table.name} is related to the selected visuals but reads ${connector}, which cannot be read live; filters that flow through it may not be reproduced.`);
   }
   if (blocking.length && env.HC_ALLOW_UNSUPPORTED_CONNECTORS !== 'true') {
-    throw new ConversionError(`The selected pages need data from connector(s) this converter has no driver for: ${blocking.map(item => `${item.connector} (${item.usedBy.slice(0, 3).join(', ')})`).join('; ')}.`, { phase: 'preflight', hint: 'Only PostgreSQL and local/network CSV/JSON files can be read live. Choose pages that use those sources, or set HC_ALLOW_UNSUPPORTED_CONNECTORS=true in gemini/.env to build anyway with labeled placeholders.' });
+    throw new ConversionError(`The selected pages need data from connector(s) this converter has no driver for: ${blocking.map(item => `${item.connector} (${item.usedBy.slice(0, 3).join(', ')})`).join('; ')}.`, { phase: 'preflight', hint: 'Live data can come from PostgreSQL, and from CSV, JSON and Excel (.xlsx/.xlsm) files on this PC or a network share (SharePoint/OneDrive files through HC_SOURCE_MAP in gemini/.env). Choose pages that use those sources, or set HC_ALLOW_UNSUPPORTED_CONNECTORS=true in gemini/.env to build anyway with labeled placeholders.' });
   }
-  const scopedFiles = new Set((digest.model?.tables ?? []).map(table => table.source).concat((digest.model?.expressions ?? []).map(item => item.source)));
   for (const source of inventory.fileSources ?? []) {
     if (source.available) continue;
-    const inScope = scopedFiles.has(source.referencedBy) || !scopedFiles.size;
-    log.warn('preflight', `File source not readable from this PC: ${source.path} (${source.error})${inScope ? '' : ' - not used by the selected pages'}.`);
+    log.warn('preflight', `File source not readable from this PC: ${source.path} (${source.error})${sourceInScope(source) ? '' : ' - not used by the selected pages'}.`);
   }
-  const needed = (inventory.fileSources ?? []).filter(source => !source.available && (scopedFiles.has(source.referencedBy) || !scopedFiles.size));
-  if (needed.length) throw new ConversionError(`The selected pages read file(s) this PC cannot open: ${needed.map(source => source.path).join(', ')}.`, { phase: 'preflight', hint: 'Connect to VPN / the network share, check the path exists for your Windows account (and that the M parameter holding the folder is right), then rerun .\\setup.ps1.' });
+  const needed = (inventory.fileSources ?? []).filter(source => !source.available && sourceInScope(source));
+  if (needed.length) throw new ConversionError(`The selected pages read file(s) this PC cannot open: ${needed.map(source => `${source.path}${source.error ? ` (${source.error === 'TIMEOUT' ? 'no answer within 15 s' : source.error})` : ''}`).join(', ')}.`, { phase: 'preflight', hint: `Connect to VPN / the network share, check the path exists for your Windows account (and that the M parameter holding the folder is right)${needed.some(source => source.mappedBy) ? '; for a mapped file check the HC_SOURCE_MAP line in gemini/.env' : ''}, then rerun .\\setup.ps1.` });
+  // Excel workbooks: the file opens, and every sheet/table/name the report navigates to exists.
+  for (const source of (inventory.fileSources ?? []).filter(item => item.reader === 'Excel.Workbook' && item.kind === 'file' && item.available && sourceInScope(item))) {
+    if (source.workbookError) throw new ConversionError(`The selected pages read the Excel workbook ${source.path}, which cannot be opened: ${source.workbookError.message}`, { phase: 'preflight', hint: `${excelErrorHint(source.workbookError) ?? 'Open the file in Excel and save it again as .xlsx.'} Nothing was sent to Gemini yet.` });
+    const available = source.workbook?.items ?? [];
+    const wanted = (source.excel?.items ?? []).filter(item => !item.unknown && (item.query == null || !scopedFiles.size || directQueries.has(item.query)));
+    const missing = wanted.filter(item => Number.isInteger(item.index) ? item.index >= available.length : !available.some(entry => entry.name.toLowerCase() === String(item.item).toLowerCase() && (!item.kind || entry.kind === item.kind)));
+    if (missing.length) {
+      const describe = item => Number.isInteger(item.index) ? `item number ${item.index}` : `${item.kind ? `${item.kind.toLowerCase()} ` : ''}"${item.item}"${item.query ? ` (read by ${item.query})` : ''}`;
+      throw new ConversionError(`The Excel workbook ${source.path} has no ${missing.map(describe).join(', ')}. It has: ${available.map(entry => `${entry.name} (${entry.kind})`).join(', ') || 'no sheets'}.`, { phase: 'preflight', hint: 'The sheet, table or named range was renamed or deleted since the report was built. Restore it (or use the workbook version the report was built on), then rerun .\\setup.ps1. Nothing was sent to Gemini yet.' });
+    }
+    if (wanted.some(item => Number.isInteger(item.index))) log.warn('preflight', `${source.path}: the report picks a workbook item by position ({0}); the converter uses sheets in workbook order, then tables, then named ranges. Compare that visual with Power BI.`);
+  }
+  for (const workbook of (inventory.excelWorkbooks ?? []).filter(item => item.origin.kind === 'folder' && readsInScope(item))) {
+    log.info('preflight', `Query ${workbook.query ?? '(unnamed)'} reads Excel workbooks combined from the folder ${workbook.origin.path ?? '(see the M code)'}${workbook.items.length ? `, item ${workbook.items.map(item => item.item ?? `#${item.index}`).join(', ')} of each file` : ''}.`);
+  }
   for (const item of inventory.unresolvedSources ?? []) {
     if (scopedFiles.size && ![...scopedFiles].some(file => item.referencedBy.startsWith(file))) continue;
     log.warn('preflight', `Cannot check ${item.connector}(${item.arguments}) in ${item.referencedBy} before the run: its target is computed. The generated backend's source healthcheck will test it.`);
@@ -745,6 +776,12 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
   addSecretsFromEnv(process.env);
   log.info('scan', `Reading the PBIP project in ${rel(inputDir)}...`);
   const discovered = discover({ checkFiles: false });
+  const sourceMap = parseSourceMap(env);
+  if (sourceMap.problems.length) throw new ConversionError(sourceMap.problems.join(' '), { phase: 'scan', hint: 'Fix the HC_SOURCE_MAP line(s) in gemini/.env, for example: HC_SOURCE_MAP_1=https://contoso.sharepoint.com/sites/Finance/Shared Documents/Plan.xlsx => C:\\Users\\you\\Contoso\\Finance - Documents\\Plan.xlsx' });
+  for (const entry of applySourceMap(discovered, sourceMap.entries)) {
+    if (entry.used) log.info('scan', `${entry.key}: ${entry.from} is read from ${entry.to} (${entry.used} source(s)).`);
+    else log.warn('scan', `${entry.key} in gemini/.env matches no file, folder or URL in the PBIP: ${entry.from}`);
+  }
   // File and folder sources are checked in parallel with a time limit, so an unreachable network share cannot freeze this window.
   if (discovered.fileSources.length) {
     log.info('scan', `Checking ${discovered.fileSources.length} file/folder source(s) the model reads (up to 15 s each)...`);
@@ -754,6 +791,21 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
         ? log.detail('scan', `[${done}/${total}] ${source.path}: readable${source.bytes !== null ? ` (${formatBytes(source.bytes)})` : ''} in ${ms} ms`)
         : log.warn('scan', `[${done}/${total}] ${source.path}: NOT readable (${source.error === 'TIMEOUT' ? 'no answer within 15 s: VPN or network share?' : source.error})`)
     });
+  }
+  // Excel workbooks: structure only (sheets, tables, named ranges, header rows), for preflight and the digest.
+  for (const source of discovered.fileSources.filter(item => item.reader === 'Excel.Workbook' && item.kind === 'file' && item.available)) {
+    const started = Date.now();
+    log.info('scan', `Reading the structure of the Excel workbook ${source.path}${source.bytes ? ` (${formatBytes(source.bytes)})` : ''}...`);
+    try {
+      const info = inspectWorkbook(source.path);
+      source.workbook = { items: info.items, ...(info.date1904 ? { date1904: true } : {}), ...(info.warnings.length ? { warnings: info.warnings } : {}) };
+      const listed = info.items.map(item => `${item.name} (${item.kind}${item.ref && item.kind !== 'DefinedName' ? ` ${item.ref}` : ''}${item.hidden ? ', hidden' : ''})`);
+      log.info('scan', `  ${listed.length} item(s) in ${Date.now() - started} ms: ${listed.slice(0, 12).join(', ')}${listed.length > 12 ? ', ...' : ''}. The report reads: ${(source.excel?.items ?? []).map(item => item.unknown ? '(not visible in the M code)' : Number.isInteger(item.index) ? `item #${item.index}` : `${item.item}${item.kind ? ` (${item.kind})` : ''}`).join(', ') || '(not visible in the M code)'}.`);
+      for (const warning of info.warnings) log.warn('scan', `  ${warning}`);
+    } catch (error) {
+      source.workbookError = { code: error.code ?? null, message: error.message };
+      log.warn('scan', `  Cannot open ${source.path} as an Excel workbook: ${error.message}`);
+    }
   }
   const scope = createRunScope(pageLimit);
   const selected = selectPages(discovered.pages, pageLimit);
@@ -765,7 +817,9 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
   log.info('scope', scopeSummary(inventory, discovered));
   const skippedHidden = pageLimit ? discovered.pages.slice(0, discovered.pages.indexOf(selected[selected.length - 1]) + 1).filter(page => page.hidden && !selected.includes(page)) : [];
   if (skippedHidden.length) log.info('scope', `Skipped hidden page(s) not visible to report readers: ${skippedHidden.map(page => `"${page.name}"`).join(', ')}.`);
-  log.info('scope', `Sources: ${inventory.postgresSources.length} PostgreSQL, ${inventory.directCsvSources.length} direct CSV, ${inventory.unsupportedConnectors.length} other connector reference(s).`);
+  const excelFiles = inventory.fileSources.filter(source => source.reader === 'Excel.Workbook' && source.kind === 'file').length;
+  const combined = (inventory.excelWorkbooks ?? []).filter(item => item.origin.kind === 'folder').length;
+  log.info('scope', `Sources: ${inventory.postgresSources.length} PostgreSQL, ${inventory.directCsvSources.length} direct CSV, ${excelFiles} Excel workbook(s)${combined ? ` plus ${combined} combined from folders` : ''}, ${(inventory.remoteReads ?? []).length} SharePoint/web file read(s)${(inventory.remoteReads ?? []).some(read => read.mappedTo) ? ' (mapped ones read locally)' : ''}, ${inventory.unsupportedConnectors.filter(item => !item.mappedTo).length} other connector reference(s).`);
   fs.mkdirSync(scope.workDir, { recursive: true });
   const previousInventory = readJson(path.join(scope.workDir, 'inventory.json'));
   writeJson(path.join(scope.workDir, 'inventory.json'), inventory);

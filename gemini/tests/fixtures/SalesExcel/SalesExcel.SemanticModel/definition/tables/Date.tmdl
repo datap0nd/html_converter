@@ -1,0 +1,57 @@
+table Date
+	lineageTag: b07b1cd3-5c2f-4c8d-bba8-6caf7995d08a
+	dataCategory: Time
+
+	column Date
+		dataType: dateTime
+		isKey
+		formatString: Short Date
+		lineageTag: 2e4d53fc-e1e0-47de-991e-0cbc79a1a2de
+		summarizeBy: none
+		isNameInferred
+		sourceColumn: [Date]
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	column Year = YEAR('Date'[Date])
+		dataType: int64
+		formatString: 0
+		lineageTag: d9818335-c1fa-42fd-890c-8fa81120e07c
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Month Number' = MONTH('Date'[Date])
+		dataType: int64
+		isHidden
+		formatString: 0
+		lineageTag: d4d7ae36-e12e-4981-b1b1-8e691bfca3d7
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	column Month = FORMAT('Date'[Date], "MMM")
+		dataType: string
+		lineageTag: 8f50c178-1d19-4e1f-a2aa-04da7ae11b5e
+		summarizeBy: none
+		sortByColumn: 'Month Number'
+
+		changedProperty = SortByColumn
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Year Month' = FORMAT('Date'[Date], "yyyy-MM")
+		dataType: string
+		lineageTag: 351da8d0-f42d-49bd-889c-741e9dedc4e2
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	partition Date = calculated
+		mode: import
+		source = CALENDAR(DATE(2023, 1, 1), DATE(2025, 12, 31))
+
+	annotation PBI_Id = f41a17cfce02dd3b07242d0d091a8808
+

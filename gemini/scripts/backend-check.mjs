@@ -26,6 +26,7 @@ import * as core from './core.mjs';
 import * as sources from './sources.mjs';
 import { loadPg, postgresConfig, createPostgresPool, postgresHint, testPostgresConnection } from './sources.mjs';
 import { killProcessTree } from './gemini.mjs';
+import { readExcel, inspectWorkbook, excelErrorHint } from './excel.mjs';
 import { formatDuration } from './log.mjs';
 
 const thisFile = fileURLToPath(import.meta.url);
@@ -42,7 +43,7 @@ export const BACKEND_CONTRACT = [
   'export async function createBackend({ env, root, inputDir, helpers }) returning { healthcheck(), query({ visualId, filters, limit }), close() }.',
   'healthcheck() -> { ok: true, sources: string[] } or { ok: false, issues: (string | { kind: "environment"|"code", message, path? })[] }.',
   `query() -> { rows: object[] (at most limit = ${QUERY_ROW_LIMIT}), columns: string[] naming every row key, placeholder: boolean, limitations: string[] }; numbers are JS numbers, dates "YYYY-MM-DD" strings, blanks null.`,
-  'PostgreSQL only through helpers.postgres.createPool(helpers.postgres.connections[i]) (same settings as the converter preflight, read-only, 60 s statement timeout, errors handled); files only at the exact paths in helpers.inventory.fileSources / helpers.digest.sources.files; close() ends pools and timers.',
+  'PostgreSQL only through helpers.postgres.createPool(helpers.postgres.connections[i]) (same settings as the converter preflight, read-only, 60 s statement timeout, errors handled); files only at the exact paths in helpers.inventory.fileSources / helpers.digest.sources.files; Excel only through helpers.excel.read(path, { item, kind, useHeaders }) with the items listed in fileSources[].excel.items (no npm Excel package); close() ends pools and timers.',
   'No process.env, no imports outside output/dynamic (own modules next to backend.mjs are fine), no npm packages other than pg, no reads of work/ or output/ files at runtime (use helpers.digest / helpers.inventory).'
 ].join(' ');
 
@@ -176,6 +177,8 @@ const helpersByBackend = new WeakMap();
 //   digest, inventory                     the scoped report digest and { postgresSources, fileSources,
 //                                         webSources, mParameters }
 //   enterData                             digest.enterData (decoded "Enter Data" tables) or {}
+//   excel.read(path, options)             one sheet/table/defined name as { columns, rows, warnings } (excel.mjs readExcel)
+//   excel.inspect(path)                   the workbook's items (excel.mjs inspectWorkbook)
 // onPoolError(error, { connection }) receives pool connection errors (they never crash the process).
 export function backendHelpers({ env = {}, inventory = {}, digest = null, onPoolError } = {}) {
   const inv = inventory && typeof inventory === 'object' ? inventory : {};
@@ -185,6 +188,7 @@ export function backendHelpers({ env = {}, inventory = {}, digest = null, onPool
   const fileSources = firstArray(inv.fileSources, found.files);
   const webSources = firstArray(inv.webSources, found.web, found.webSources);
   const mParameters = [inv.mParameters, found.mParameters].find(value => value && typeof value === 'object' && !Array.isArray(value)) ?? {};
+  const excelWorkbooks = firstArray(inv.excelWorkbooks, found.excelWorkbooks);
   const pools = new Set();
   const resolveConnection = connection => {
     if (connection === undefined || connection === null) {
@@ -218,8 +222,9 @@ export function backendHelpers({ env = {}, inventory = {}, digest = null, onPool
       }
     },
     digest: digest ?? null,
-    inventory: { postgresSources, fileSources, webSources, mParameters },
-    enterData: digest?.enterData && typeof digest.enterData === 'object' ? digest.enterData : {}
+    inventory: { postgresSources, fileSources, webSources, mParameters, excelWorkbooks },
+    enterData: digest?.enterData && typeof digest.enterData === 'object' ? digest.enterData : {},
+    excel: { read: (file, options) => readExcel(file, options ?? {}), inspect: file => inspectWorkbook(file) }
   };
   poolsByHelpers.set(helpers, pools);
   return helpers;
@@ -531,6 +536,10 @@ export function diagnoseBackendIssue(issue, context = {}) {
     if (PG_CODE_SQLSTATE.test(code)) return verdict('code', 'sql-error');
   }
   if (code === 'HC_TIMEOUT' || code === 'HC_BLOCKED') return timeoutVerdict(ctx);
+  // The converter's Excel reader: a sheet/table the backend asked for that does not exist is a code
+  // problem (preflight already checked the ones the report navigates to); an unreadable file is not.
+  if (code === 'HC_EXCEL_ITEM') return verdict('code', 'excel-item', null, '[Use the exact item and kind listed in helpers.inventory.fileSources[].excel.items (and useHeaders), not a guessed sheet name.]');
+  if (/^HC_EXCEL_(?:ENCRYPTED|FORMAT|TOO_LARGE)$/.test(code)) return verdict('environment', 'excel-file', excelErrorHint({ code }));
   if (code === 'PG_DRIVER_MISSING' || PG_DRIVER_TEXT.test(text)) return verdict('environment', 'driver-missing', postgresHint('driver missing'));
   if (NETWORK_CODES.has(code)) return connectivityVerdict(info, text, ctx, 'network');
   if (TLS_CODE.test(code)) return connectivityVerdict(info, text, ctx, 'tls');

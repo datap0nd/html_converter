@@ -399,7 +399,7 @@ function enclosingCall(tokens, k) {
   return -1;
 }
 
-const CONNECTOR_NAMES = 'Sql\\.Databases?|MySQL\\.Database|Oracle\\.Database|Odbc\\.(?:DataSource|Query)|OleDb\\.(?:DataSource|Query)|Web\\.Contents|SharePoint\\.(?:Files|Contents|Tables)|AzureStorage\\.[A-Za-z]+|Folder\\.(?:Files|Contents)|Excel\\.Workbook|AnalysisServices\\.Databases?|Snowflake\\.Databases|GoogleBigQuery\\.Database|Databricks\\.Catalogs|PowerBI\\.Dataflows|PowerPlatform\\.Dataflows|Lakehouse\\.Contents|Fabric\\.[A-Za-z]+|OData\\.Feed|SapHana\\.Database|SapBusinessWarehouse\\.Cubes|Teradata\\.Database|DB2\\.Database|AmazonRedshift\\.Database|Access\\.Database|CommonDataService\\.Database|AzureDataExplorer\\.Contents|Salesforce\\.(?:Data|Reports)|Sybase\\.Database|Informix\\.Database|Impala\\.Database|Spark\\.Tables|Hdfs\\.(?:Files|Contents)';
+const CONNECTOR_NAMES = 'Sql\\.Databases?|MySQL\\.Database|Oracle\\.Database|Odbc\\.(?:DataSource|Query)|OleDb\\.(?:DataSource|Query)|Web\\.Contents|SharePoint\\.(?:Files|Contents|Tables)|AzureStorage\\.[A-Za-z]+|Folder\\.(?:Files|Contents)|AnalysisServices\\.Databases?|Snowflake\\.Databases|GoogleBigQuery\\.Database|Databricks\\.Catalogs|PowerBI\\.Dataflows|PowerPlatform\\.Dataflows|Lakehouse\\.Contents|Fabric\\.[A-Za-z]+|OData\\.Feed|SapHana\\.Database|SapBusinessWarehouse\\.Cubes|Teradata\\.Database|DB2\\.Database|AmazonRedshift\\.Database|Access\\.Database|CommonDataService\\.Database|AzureDataExplorer\\.Contents|Salesforce\\.(?:Data|Reports)|Sybase\\.Database|Informix\\.Database|Impala\\.Database|Spark\\.Tables|Hdfs\\.(?:Files|Contents)';
 const CONNECTOR_CALL = new RegExp(`\\b(${CONNECTOR_NAMES})\\s*\\(`, 'g');
 const CONNECTOR_NAME = new RegExp(`^(?:${CONNECTOR_NAMES}|PostgreSQL\\.Database)$`);
 
@@ -452,7 +452,8 @@ function createMResolver(queries, parameters) {
 
   function call(q, a, depth) {
     const name = q.tokens[a].v;
-    if (name !== 'PostgreSQL.Database') return { type: 'call', name };
+    // q and a let callers read the call's own arguments (Excel.Workbook's file, ...).
+    if (name !== 'PostgreSQL.Database') return { type: 'call', name, q, a };
     const args = bracketItems(q, a + 1) ?? [];
     const server = args[0] ? text(q, args[0].start, args[0].end, depth + 1) : null;
     const database = args[1] ? text(q, args[1].start, args[1].end, depth + 1) : null;
@@ -483,7 +484,7 @@ function createMResolver(queries, parameters) {
     });
   }
 
-  return { value, text };
+  return { value, text, byName };
 }
 
 function modelSourceFiles(files) {
@@ -611,6 +612,108 @@ function csvOptions(q, readerIndex, resolver) {
   return { delimiter, encoding };
 }
 
+// Where the bytes of a binary reader (Excel.Workbook, Csv.Document, ...) come from:
+// { kind: 'file', path } | { kind: 'remote', connector, url } | { kind: 'folder' } (a file
+// of a Folder.Files listing, as in "Combine files") | { kind: 'unknown' }.
+const REMOTE_CONNECTOR = /^(?:Web\.Contents|SharePoint\.(?:Files|Contents)|OneDrive\.\w+|AzureStorage\.\w+|AzureDataLakeStorage\.\w+|Hdfs\.(?:Files|Contents))$/;
+const LISTING_CONNECTOR = /^(?:Folder\.(?:Files|Contents)|SharePoint\.(?:Files|Contents)|AzureStorage\.\w+|AzureDataLakeStorage\.\w+|Hdfs\.(?:Files|Contents))$/;
+
+function binaryOrigin(q, range, resolver, depth = 0, seen = new Set()) {
+  if (!range || range.a >= range.b) return { kind: 'unknown' };
+  const key = `${q.index}:${range.start}:${range.end}`;
+  if (depth > 10 || seen.has(key)) return { kind: 'unknown' };
+  seen.add(key);
+  const tokens = q.tokens;
+  // A parameter query: "value" meta [IsParameterQuery=true, ...] -> the value before meta.
+  let b = range.b;
+  for (let k = range.a; k < b; k++) if (isKeyword(tokens[k], 'meta')) { b = k; break; }
+  const end = b > range.a ? tokens[b - 1].end : range.end;
+  const whole = { a: range.a, b, start: range.start, end };
+  const found = resolver.value(q, whole.start, whole.end);
+  if (found?.type === 'call' && found.q) {
+    const args = bracketItems(found.q, found.a + 1) ?? [];
+    const textOf = arg => arg && arg.a < arg.b ? resolver.text(found.q, arg.start, arg.end) : null;
+    if (found.name === 'File.Contents') { const file = textOf(args[0]); return file === null ? { kind: 'unknown' } : { kind: 'file', path: file }; }
+    if (BINARY_WRAPPERS.has(found.name)) return binaryOrigin(found.q, args[0], resolver, depth + 1, seen);
+    if (found.name === 'Web.Contents') {
+      const url = textOf(args[0]);
+      const options = args[1] ? recordFields(found.q, args[1]) : null;
+      const relativePath = options?.has('RelativePath') ? resolver.text(found.q, options.get('RelativePath').start, options.get('RelativePath').end) : null;
+      return { kind: 'remote', connector: 'Web.Contents', url: url && relativePath ? `${url.replace(/\/+$/, '')}/${relativePath.replace(/^\/+/, '')}` : url, ...(found.q.name != null ? { originQuery: found.q.name } : {}) };
+    }
+    if (REMOTE_CONNECTOR.test(found.name)) return { kind: 'remote', connector: found.name, url: textOf(args[0]), ...(found.q.name != null ? { originQuery: found.q.name } : {}) };
+  }
+  // A let expression (a whole query): its result.
+  if (isKeyword(tokens[whole.a], 'let')) {
+    const body = q.lets.find(scope => scope.start === tokens[whole.a].start)?.body;
+    if (body) { const [a2, b2] = tokenRange(tokens, body.start, body.end); return binaryOrigin(q, { a: a2, b: b2, start: body.start, end: body.end }, resolver, depth + 1, seen); }
+  }
+  // Listing{[Name="file.xlsx", #"Folder Path"="..."]}[Content] or Listing{0}[Content].
+  const first = tokens[whole.a];
+  if (first?.t === 'id' && isP(tokens[whole.a + 1], '{') && tokens[whole.a + 1].match !== undefined) {
+    const close = tokens[whole.a + 1].match;
+    if (isP(tokens[close + 1], '[') && tokens[close + 2]?.v === 'Content') {
+      const fields = isP(tokens[whole.a + 2], '[') && tokens[whole.a + 2].match !== undefined ? recordFields(q, { a: whole.a + 2, b: tokens[whole.a + 2].match + 1 }) : null;
+      const fileName = fields?.has('Name') ? resolver.text(q, fields.get('Name').start, fields.get('Name').end) : null;
+      const folderPath = fields?.has('Folder Path') ? resolver.text(q, fields.get('Folder Path').start, fields.get('Folder Path').end) : null;
+      let listing = resolver.value(q, first.start, first.end);
+      // Through Table.SelectRows / Table.Sort / ... steps to the listing itself.
+      for (let guard = 0; listing?.type === 'call' && listing.q && /^Table\./.test(listing.name) && guard < 20; guard++) {
+        const inner = (bracketItems(listing.q, listing.a + 1) ?? [])[0];
+        listing = inner ? resolver.value(listing.q, inner.start, inner.end) : null;
+      }
+      if (listing?.type === 'call' && listing.q && LISTING_CONNECTOR.test(listing.name)) {
+        const root = (() => { const arg = (bracketItems(listing.q, listing.a + 1) ?? [])[0]; return arg && arg.a < arg.b ? resolver.text(listing.q, arg.start, arg.end) : null; })();
+        const joined = fileName ? `${folderPath ?? (root ? `${root.replace(/[\\/]+$/, '')}${/^[a-z]+:\/\//i.test(root) ? '/' : '\\'}` : '')}${fileName}` : null;
+        if (/^Folder\./.test(listing.name)) return joined ? { kind: 'file', path: joined, listing: root } : { kind: 'folder', path: root };
+        return { kind: 'remote', connector: listing.name, url: joined ?? root, ...(joined ? {} : { fileUnknown: true }), ...(listing.q.name != null ? { originQuery: listing.q.name } : {}) };
+      }
+    }
+  }
+  // A single name: a step, another query, or a parameter.
+  if (whole.b - whole.a === 1 && first?.t === 'id') {
+    const local = localBinding(q, first.v, first.start);
+    if (local) { const [a2, b2] = tokenRange(tokens, local.start, local.end); return binaryOrigin(q, { a: a2, b: b2, start: local.start, end: local.end }, resolver, depth + 1, seen); }
+    const other = resolver.byName.get(first.v);
+    if (other) return binaryOrigin(other, { a: 0, b: other.tokens.length, start: 0, end: other.text.length }, resolver, depth + 1, seen);
+  }
+  // Anything else ([Content] of combined files, a function parameter): judged by its text.
+  const text = q.text.slice(whole.start, whole.end);
+  const remote = /\b(Web\.Contents|SharePoint\.(?:Files|Contents)|OneDrive\.\w+|AzureStorage\.\w+|AzureDataLakeStorage\.\w+)\s*\(/.exec(text);
+  if (remote) return { kind: 'remote', connector: remote[1], url: null, ...(q.name != null ? { originQuery: q.name } : {}) };
+  return /\bFolder\.(?:Files|Contents)\s*\(/.test(text) ? { kind: 'folder' } : { kind: 'unknown' };
+}
+
+// Excel.Workbook(workbook, useHeaders, delayTypes) or Excel.Workbook(workbook, [UseHeaders=..., InferSheetDimensions=...]).
+function excelOptions(q, args) {
+  const second = args[1];
+  const literal = range => range && range.a < range.b ? q.text.slice(range.start, range.end).trim().toLowerCase() : '';
+  if (second && isP(q.tokens[second.a], '[')) {
+    const fields = recordFields(q, second);
+    return { useHeaders: literal(fields?.get('UseHeaders')) === 'true', inferSheetDimensions: literal(fields?.get('InferSheetDimensions')) === 'true' };
+  }
+  return { useHeaders: literal(second) === 'true', inferSheetDimensions: false };
+}
+
+// Records on a file source which sheets/tables/names an Excel.Workbook read navigates to.
+// Each item keeps the options of the call that reads it (useHeaders, inferSheetDimensions).
+function attachExcelItems(record, read) {
+  record.excel ??= { items: [] };
+  const options = { useHeaders: Boolean(read.useHeaders), ...(read.inferSheetDimensions ? { inferSheetDimensions: true } : {}) };
+  const same = (a, b) => a.item === b.item && a.kind === b.kind && a.index === b.index && a.unknown === b.unknown && a.useHeaders === b.useHeaders && !a.inferSheetDimensions === !b.inferSheetDimensions;
+  for (const item of read.items?.length ? read.items : [{ unknown: true }]) {
+    const entry = { ...item, ...options };
+    if (!record.excel.items.some(existing => same(existing, entry))) record.excel.items.push({ ...entry, ...(read.query != null ? { query: read.query } : {}) });
+  }
+}
+
+// Readers whose first argument is the bytes of a file.
+const BINARY_READERS = new Set(['Excel.Workbook', 'Csv.Document', 'Json.Document', 'Xml.Tables', 'Xml.Document', 'Lines.FromBinary', 'Parquet.Document', 'Pdf.Tables']);
+
+export function sourceKey(sourcePath, kind = 'file') {
+  return `${kind === 'folder' ? 'folder' : 'file'}\0${process.platform === 'win32' || path.win32.isAbsolute(String(sourcePath)) ? String(sourcePath).toLowerCase() : sourcePath}`;
+}
+
 function hostOf(url) {
   try { return new URL(url).host || null; } catch { return null; }
 }
@@ -658,6 +761,21 @@ export function scanModelSources(files, { checkFiles = true } = {}) {
     if (!connection.nativeQueries.some(x => x.sql === sql && JSON.stringify(x.parameters) === JSON.stringify(values))) connection.nativeQueries.push({ sql, parameters: values, referencedBy: q.file, ...(q.name != null ? { query: q.name } : {}) });
   };
   const isConnection = found => found?.type === 'pg' && !found.query;
+  // Every binary reader call (Excel.Workbook, Csv.Document, ...) and where its bytes come from.
+  const binaryReads = new Map();
+  for (const q of queries) {
+    for (let k = 0; k < q.tokens.length - 1; k++) {
+      const token = q.tokens[k];
+      if (token.t !== 'id' || !BINARY_READERS.has(token.v) || !isP(q.tokens[k + 1], '(') || q.tokens[k + 1].match === undefined) continue;
+      const args = bracketItems(q, k + 1) ?? [];
+      const origin = binaryOrigin(q, args[0], resolver);
+      binaryReads.set(`${q.index}:${token.start}`, {
+        reader: token.v, query: q.name ?? null, referencedBy: q.file, origin,
+        ...(token.v === 'Excel.Workbook' ? { ...excelOptions(q, args), items: [] } : {})
+      });
+    }
+  }
+  const excelReadFor = found => found?.type === 'call' && found.name === 'Excel.Workbook' && found.q ? binaryReads.get(`${found.q.index}:${found.q.tokens[found.a].start}`) ?? null : null;
 
   for (const q of queries) {
     const where = `${q.file}${q.name ? ` (${q.name})` : ''}`;
@@ -685,7 +803,31 @@ export function scanModelSources(files, { checkFiles = true } = {}) {
       const found = resolver.value(q, range.start, range.end);
       if (isConnection(found)) reach(found);
     }
-    // 3. Navigation: X{[Schema="s",Item="t"]}[Data] where X resolves to a connection.
+    // 3. Navigation: X{[Schema="s",Item="t"]}[Data] where X resolves to a connection;
+    //    Excel: Wb{[Item="Sheet1",Kind="Sheet"]}[Data], Wb{[Name="Sales"]}[Data], Wb{0}[Data].
+    const navigationTarget = k => {
+      const before = tokens[k - 1];
+      if (before?.t === 'id') return { start: before.start, end: before.end };
+      if (isP(before, ')') && before.match !== undefined) return { start: tokens[before.match - 1]?.t === 'id' ? tokens[before.match - 1].start : tokens[before.match].start, end: before.end };
+      return null;
+    };
+    for (let k = 1; k < tokens.length - 2; k++) {
+      if (!isP(tokens[k], '{') || tokens[k].match === undefined) continue;
+      const positional = tokens[k + 1].t === 'num' && tokens[k].match === k + 2;
+      const record = isP(tokens[k + 1], '[') && tokens[k + 1].match !== undefined && tokens[k + 1].match + 1 === tokens[k].match;
+      if (!positional && !record) continue;
+      const fields = record ? recordFields(q, { a: k + 1, b: tokens[k + 1].match + 1 }) : null;
+      if (fields?.has('Schema')) continue;
+      const target = navigationTarget(k);
+      const workbook = target ? excelReadFor(resolver.value(q, target.start, target.end)) : null;
+      if (!workbook) continue;
+      const item = positional ? { index: Number(tokens[k + 1].v) } : (() => {
+        const read = field => fields?.has(field) ? resolver.text(q, fields.get(field).start, fields.get(field).end) : null;
+        const name = read('Item') ?? read('Name');
+        return name === null ? null : { item: name, ...(read('Kind') ? { kind: read('Kind') } : {}) };
+      })();
+      if (item && !workbook.items.some(existing => JSON.stringify(existing) === JSON.stringify(item))) workbook.items.push(item);
+    }
     for (let k = 1; k < tokens.length - 1; k++) {
       const brace = tokens[k], open = tokens[k + 1];
       if (!isP(brace, '{') || !isP(open, '[') || open.match === undefined || open.match + 1 !== brace.match) continue;
@@ -732,8 +874,12 @@ export function scanModelSources(files, { checkFiles = true } = {}) {
       const sourcePath = args[0] && args[0].a < args[0].b ? resolver.text(q, args[0].start, args[0].end) : null;
       if (sourcePath === null) { unresolved.push({ connector: name, arguments: source(args[0]), referencedBy: where }); continue; }
       const folder = name !== 'File.Contents';
-      const key = `${folder ? 'folder' : 'file'}\0${process.platform === 'win32' ? sourcePath.toLowerCase() : sourcePath}`;
-      if (fileSources.has(key)) continue;
+      const key = sourceKey(sourcePath, folder ? 'folder' : 'file');
+      if (fileSources.has(key)) {
+        const existing = fileSources.get(key);
+        if (existing.referencedBy !== q.file) existing.alsoReferencedBy = [...new Set([...(existing.alsoReferencedBy ?? []), q.file])];
+        continue;
+      }
       const readerIndex = folder ? -1 : fileReader(q, k);
       const reader = folder ? name : readerIndex >= 0 ? tokens[readerIndex].v : null;
       const record = {
@@ -756,7 +902,25 @@ export function scanModelSources(files, { checkFiles = true } = {}) {
       if (!webSources.some(x => JSON.stringify(x) === JSON.stringify(record))) webSources.push(record);
     }
   }
-  return { parameters: Object.fromEntries(parameters), postgresSources: [...postgres.values()], fileSources: [...fileSources.values()], webSources, connectors, unresolved };
+  // Excel workbooks read from files: which items the report navigates to, and the reader options.
+  const excelWorkbooks = [], remoteReads = [];
+  for (const read of binaryReads.values()) {
+    if (read.origin.kind === 'remote') remoteReads.push({ reader: read.reader, connector: read.origin.connector, url: read.origin.url ?? null, ...(read.origin.fileUnknown ? { fileUnknown: true } : {}), referencedBy: read.referencedBy, query: read.query, ...(read.origin.originQuery ? { originQuery: read.origin.originQuery } : {}) });
+    if (read.reader !== 'Excel.Workbook') continue;
+    excelWorkbooks.push({ query: read.query, referencedBy: read.referencedBy, origin: read.origin, useHeaders: read.useHeaders, inferSheetDimensions: read.inferSheetDimensions, items: read.items });
+    if (read.origin.kind !== 'file') continue;
+    const key = sourceKey(read.origin.path);
+    let record = fileSources.get(key);
+    if (!record) {
+      // The path comes through a Folder.Files listing, not a File.Contents call.
+      record = { path: read.origin.path, referencedBy: read.referencedBy, ...(read.query != null ? { query: read.query } : {}), kind: 'file', reader: 'Excel.Workbook', absolute: path.isAbsolute(read.origin.path) || path.win32.isAbsolute(read.origin.path), ...(checkFiles ? statSource(read.origin.path) : UNCHECKED) };
+      fileSources.set(key, record);
+    }
+    if (!record.reader || BINARY_WRAPPERS.has(record.reader)) record.reader = 'Excel.Workbook';
+    if (record.referencedBy !== read.referencedBy) record.alsoReferencedBy = [...new Set([...(record.alsoReferencedBy ?? []), read.referencedBy])];
+    attachExcelItems(record, read);
+  }
+  return { parameters: Object.fromEntries(parameters), postgresSources: [...postgres.values()], fileSources: [...fileSources.values()], webSources, excelWorkbooks, remoteReads, connectors, unresolved };
 }
 
 export function findPostgresSources(files) {
@@ -793,6 +957,126 @@ export function findReportModelReferences(pbirFiles) {
       kind
     };
   });
+}
+
+// ---------- Folder.Files for generated backends ----------
+
+// The files Folder.Files lists (recursive) or Folder.Contents lists (this folder only), with
+// Power Query's column names plus the full `path`: [{ Name, Extension, "Date modified",
+// "Date created", "Folder Path", path, size }], sorted by folder then name. Hidden
+// Office lock files (~$*.xlsx) are left out like Power BI users filter them.
+export function listFolderFiles(folder, { recursive = true, includeLockFiles = false } = {}) {
+  const out = [];
+  const visit = dir => {
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+    catch (error) { if (dir === folder) throw error; return; }
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) { if (recursive) visit(full); continue; }
+      if (!entry.isFile() || (!includeLockFiles && entry.name.startsWith('~$'))) continue;
+      let stat = null;
+      try { stat = fs.statSync(full); } catch { /* vanished */ }
+      out.push({ Name: entry.name, Extension: path.extname(entry.name), 'Date modified': stat?.mtime.toISOString() ?? null, 'Date created': stat?.birthtime.toISOString() ?? null, 'Folder Path': dir.endsWith(path.sep) ? dir : dir + path.sep, path: full, size: stat?.size ?? null });
+    }
+  };
+  visit(folder);
+  return out;
+}
+
+// ---------- source map (HC_SOURCE_MAP_* in .env) ----------
+//
+// HC_SOURCE_MAP_1=<path or URL as written in the PBIP> => <path on this PC>
+// maps a file, or everything below a folder/URL prefix, to a local copy: a
+// SharePoint/OneDrive library synced by OneDrive, a downloaded file, or an .xlsx
+// saved from an .xls or password-protected workbook.
+
+export function parseSourceMap(env = {}) {
+  const entries = [], problems = [];
+  const keys = Object.keys(env).filter(key => /^HC_SOURCE_MAP(?:_[A-Z0-9_]+)?$/.test(key)).sort((a, b) => a.localeCompare(b, 'en', { numeric: true }));
+  const unquote = text => text.trim().replace(/^(["'])(.*)\1$/, '$2').trim();
+  for (const key of keys) {
+    const value = String(env[key] ?? '').trim();
+    if (!value) continue;
+    const at = value.indexOf('=>');
+    const from = at < 0 ? '' : unquote(value.slice(0, at)), to = at < 0 ? '' : unquote(value.slice(at + 2));
+    if (!from || !to) { problems.push(`${key} in gemini/.env must look like: ${key}=<path or URL used in the PBIP> => <path on this PC>`); continue; }
+    entries.push({ key, from, to });
+  }
+  return { entries, problems };
+}
+
+function decodedPath(text) {
+  let value = String(text ?? '');
+  try { value = decodeURI(value); } catch { /* a literal % in a path */ }
+  return value.replaceAll('\\', '/');
+}
+
+// The local path for a PBIP path/URL, or null. A mapping also covers everything below it.
+export function mapSourcePath(value, entries) {
+  if (value === null || value === undefined || !entries?.length) return null;
+  const decoded = decodedPath(value).replace(/\/+$/, '');
+  const lower = decoded.toLowerCase();
+  for (const entry of entries) {
+    const from = decodedPath(entry.from).replace(/\/+$/, '').toLowerCase();
+    if (!from) continue;
+    if (lower === from) return { to: entry.to, entry };
+    if (lower.startsWith(`${from}/`)) {
+      const separator = /^[A-Za-z]:|^\\\\|\\/.test(entry.to) ? '\\' : '/';
+      const rest = decoded.slice(from.length + 1).split('/').join(separator);
+      return { to: `${entry.to.replace(/[\\/]+$/, '')}${separator}${rest}`, entry };
+    }
+  }
+  return null;
+}
+
+const isAbsolutePath = file => path.isAbsolute(file) || path.win32.isAbsolute(file);
+
+// Applies the source map to a discover() result before its sources are checked.
+// Returns [{ key, from, to, used }]; mapped sources keep originalPath / originalUrl.
+export function applySourceMap(inventory, entries) {
+  const used = new Map();
+  const note = entry => used.set(entry.key, (used.get(entry.key) ?? 0) + 1);
+  if (entries.length) {
+    for (const source of inventory.fileSources ?? []) {
+      const mapped = mapSourcePath(source.path, entries);
+      if (!mapped) continue;
+      Object.assign(source, { originalPath: source.path, path: mapped.to, absolute: isAbsolutePath(mapped.to), mappedBy: mapped.entry.key });
+      note(mapped.entry);
+    }
+    for (const workbook of inventory.excelWorkbooks ?? []) {
+      const where = workbook.origin.kind === 'file' ? workbook.origin.path : workbook.origin.kind === 'remote' ? workbook.origin.url : null;
+      const mapped = mapSourcePath(where, entries);
+      if (mapped) workbook.origin = { kind: 'file', path: mapped.to, ...(workbook.origin.kind === 'remote' ? { originalUrl: where, connector: workbook.origin.connector } : { originalPath: where }) };
+    }
+    const mappedQueries = new Set();
+    for (const read of inventory.remoteReads ?? []) {
+      const mapped = mapSourcePath(read.url, entries);
+      if (!mapped) continue;
+      note(mapped.entry);
+      read.mappedTo = mapped.to;
+      for (const name of [read.query, read.originQuery]) if (name != null) mappedQueries.add(name);
+      const kind = read.fileUnknown ? 'folder' : 'file';
+      const key = sourceKey(mapped.to, kind);
+      let record = (inventory.fileSources ?? []).find(source => sourceKey(source.path, source.kind) === key);
+      if (!record) {
+        record = { path: mapped.to, originalUrl: read.url, referencedBy: read.referencedBy, ...(read.query != null ? { query: read.query } : {}), kind, reader: kind === 'folder' ? 'Folder.Files' : read.reader, absolute: isAbsolutePath(mapped.to), mappedBy: mapped.entry.key, available: null, bytes: null, error: null };
+        inventory.fileSources.push(record);
+      }
+      if (read.reader === 'Excel.Workbook' && kind === 'file') {
+        const workbook = (inventory.excelWorkbooks ?? []).find(item => item.query === read.query && item.origin.kind === 'file' && item.origin.path === mapped.to);
+        attachExcelItems(record, workbook ?? { items: [], query: read.query });
+      }
+    }
+    // Remote connectors whose every read now comes from a local copy no longer block the run.
+    for (const connector of inventory.unsupportedConnectors ?? []) {
+      if (connector.query != null && mappedQueries.has(connector.query) && REMOTE_CONNECTOR.test(connector.connector)) connector.mappedTo = 'local copy (HC_SOURCE_MAP)';
+    }
+    inventory.directCsvSources = directCsv(inventory.fileSources ?? []);
+  }
+  inventory.sourceMap = entries.map(entry => ({ key: entry.key, from: entry.from, to: entry.to, used: used.get(entry.key) ?? 0 }));
+  inventory.warnings = inventoryWarnings(inventory);
+  return inventory.sourceMap;
 }
 
 // ---------- "Enter Data" tables ----------
@@ -936,7 +1220,8 @@ function inventoryWarnings(inventory) {
     ...postgresSources.filter(x => x.nativeQueries.length).map(x => `PostgreSQL native query found for ${x.server}/${x.database}; explicit PG_ALLOW_NATIVE_QUERIES=true is required. Power Query steps after SQL, merges, and DAX are not applied automatically.`),
     ...postgresSources.filter(x => !x.tables.length && !x.nativeQueries.length && !x.hasUnresolvedNativeQuery).map(x => `PostgreSQL source ${x.server}/${x.database} has no simple schema/table navigation to read.`),
     ...(webSources.length ? [`Web.Contents source(s) found (${[...new Set(webSources.map(x => x.host ?? x.url ?? 'computed URL'))].join(', ')}); they are not checked before the run and may need sign-in or a proxy.`] : []),
-    ...unsupportedConnectors.map(x => `Unsupported connector ${x.connector} in ${x.referencedBy}; this run will not access it.`),
+    ...(inventory.remoteReads ?? []).filter(x => !x.mappedTo).map(x => `${x.reader} reads ${x.url ?? 'a file'} through ${x.connector}; map it to a local copy with HC_SOURCE_MAP_1=<URL> => <local path> in gemini/.env.`),
+    ...unsupportedConnectors.filter(x => !x.mappedTo).map(x => `Unsupported connector ${x.connector} in ${x.referencedBy}; this run will not access it.`),
     ...(pages.length ? [] : ['No enhanced PBIR page.json files found. Legacy report.json requires agent interpretation.'])
   ];
 }
@@ -1005,6 +1290,8 @@ export function discover({ checkFiles = true } = {}) {
     directCsvSources: directCsv(scan.fileSources),
     fileSources: scan.fileSources,
     webSources: scan.webSources,
+    excelWorkbooks: scan.excelWorkbooks,
+    remoteReads: scan.remoteReads,
     sourcesChecked: checkFiles,
     postgresSources: scan.postgresSources,
     unsupportedConnectors: scan.connectors,

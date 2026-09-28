@@ -1,0 +1,49 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/page/2.1.0/schema.json",
+  "name": "deca0623f7ef3d0efae2",
+  "displayName": "Category Tooltip",
+  "displayOption": "FitToPage",
+  "height": 240,
+  "width": 320,
+  "filterConfig": {
+    "filters": [
+      {
+        "name": "8078030e54a41fa0577c",
+        "field": {
+          "Column": {
+            "Expression": {
+              "SourceRef": {
+                "Entity": "Product"
+              }
+            },
+            "Property": "Category"
+          }
+        },
+        "type": "Categorical",
+        "howCreated": "Drill"
+      }
+    ]
+  },
+  "pageBinding": {
+    "name": "b9b4777b73584b4247d6",
+    "type": "Tooltip",
+    "parameters": [
+      {
+        "name": "43e1e2c8a39f5a2c59c4",
+        "boundFilter": "8078030e54a41fa0577c",
+        "fieldExpr": {
+          "Column": {
+            "Expression": {
+              "SourceRef": {
+                "Entity": "Product"
+              }
+            },
+            "Property": "Category"
+          }
+        }
+      }
+    ]
+  },
+  "type": "Tooltip",
+  "visibility": "HiddenInViewMode"
+}

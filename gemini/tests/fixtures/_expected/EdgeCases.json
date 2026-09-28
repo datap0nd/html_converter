@@ -141,7 +141,6 @@
   "unsupportedConnectors": [
     "Sql.Database",
     "Web.Contents",
-    "Excel.Workbook",
     "File.Contents(parameterised .txt: DataFolder & \"returns.txt\")",
     "Enter Data (Binary.Decompress, embedded rows - supported offline)"
   ],
@@ -202,7 +201,7 @@
     "calculation group (nameless calculationGroup object with calculationItems)",
     "PostgreSQL.Database(PgServer, PgDatabase) driven by M parameters",
     "File.Contents(DataFolder & \"returns.txt\") - parameterised, non-.csv, tab-delimited",
-    "Excel.Workbook(File.Contents(...xlsx)) - not a CSV and not in the unsupported list; the xlsx intentionally does not exist",
+    "Excel.Workbook(File.Contents(...xlsx)) - read by the Excel reader; the xlsx intentionally does not exist, so preflight names it",
     "stores_eu.csv is ;-delimited and Windows-1252 encoded (Encoding=1252)",
     "a Power Query comment mentions Folder.Files but the query does not use it",
     "TMDLScripts/Script 1.tmdl contains OData.Feed but is a script, not the model",

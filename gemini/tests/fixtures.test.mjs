@@ -84,7 +84,8 @@ test('EdgeCases: parameterised sources resolve through literal M parameters', ()
   assert.deepEqual(files['returns.txt'].csvOptions, { delimiter: '\t', encoding: 65001 });
   assert.deepEqual(files['stores_eu.csv'].csvOptions, { delimiter: ';', encoding: 1252 });
   assert.equal(files['targets.xlsx'].reader, 'Excel.Workbook');
-  assert.deepEqual(inventory.unsupportedConnectors.map(item => item.connector).sort(), ['Excel.Workbook', 'Sql.Database', 'Web.Contents']);
+  assert.deepEqual(inventory.unsupportedConnectors.map(item => item.connector).sort(), ['Sql.Database', 'Web.Contents']);
+  assert.deepEqual(files['targets.xlsx'].excel.items.map(({ item, kind, useHeaders }) => ({ item, kind, useHeaders })), [{ item: 'Targets', kind: 'Sheet', useHeaders: false }]);
   assert.equal(inventory.problems.length, 1, inventory.problems.join('\n'));
   assert.match(inventory.problems[0], /^Page folder 4c59645e8e12373532b8 .* is not listed in pages\.json; it is placed after the listed pages/);
 }));
@@ -101,10 +102,13 @@ test('EdgeCases: the digest keeps calculation groups, report-level and formattin
   assert.deepEqual(digest.pages.map(page => page.name), ['Q&A <Ventes> "été"', 'Ünïcödé & "quotes" \'single\''], 'empty and hidden pages are not picked for the two-page test');
 }));
 
-test('EdgeCases: pages that need SQL Server or Excel stop in preflight instead of after Gemini', () => inSandbox('EdgeCases', ({ sandbox }) => {
+test('EdgeCases: pages that need SQL Server stop in preflight; a missing Excel workbook is named', () => inSandbox('EdgeCases', ({ sandbox }) => {
   const result = preflight(sandbox);
   assert.equal(result.code, 1);
-  assert.match(result.stdout, /no driver for: Sql\.Database \(table Fact Sales\); Excel\.Workbook \(table Targets\)/);
+  assert.match(result.stdout, /no driver for: Sql\.Database \(table Fact Sales\)\./);
+  const placeholders = preflight(sandbox, { HC_ALLOW_UNSUPPORTED_CONNECTORS: 'true' });
+  assert.equal(placeholders.code, 1);
+  assert.match(placeholders.stdout, /read file\(s\) this PC cannot open: .*targets\.xlsx \(ENOENT\)/);
 }));
 
 test('ThinReport and LegacyReport stop with the documented reason', async () => {

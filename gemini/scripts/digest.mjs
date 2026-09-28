@@ -493,7 +493,20 @@ export function buildReportDigest(inventory, { rootDir = defaultRoot, inputDir =
       postgres: inventory.postgresSources ?? [],
       directCsv: (inventory.directCsvSources ?? []).map(({ path: file, referencedBy, available, error }) => ({ path: file, referencedBy, available, ...(error ? { error } : {}) })),
       // Every File.Contents / Folder.Files / Folder.Contents target; csvOptions mirror Csv.Document (read with helpers.core.readCsvFile).
-      files: (inventory.fileSources ?? []).map(({ path: file, referencedBy, query, kind, reader, available, error, csvOptions }) => ({ path: file, referencedBy, ...(query != null ? { query } : {}), ...(kind ? { kind } : {}), reader, available, ...(error ? { error } : {}), ...(csvOptions ? { csvOptions } : {}) })),
+      // Excel files: excel.items are the sheets/tables/names the M code navigates to (read each with
+      // helpers.excel.read(path, item)); workbook lists what the file really contains.
+      // originalPath/originalUrl: the PBIP location this local path replaces (HC_SOURCE_MAP in .env).
+      files: (inventory.fileSources ?? []).map(({ path: file, referencedBy, alsoReferencedBy, query, kind, reader, available, error, csvOptions, excel, workbook, workbookError, originalPath, originalUrl }) => ({
+        path: file, referencedBy, ...(alsoReferencedBy?.length ? { alsoReferencedBy } : {}), ...(query != null ? { query } : {}), ...(kind ? { kind } : {}), reader, available, ...(error ? { error } : {}),
+        ...(originalPath ? { originalPath } : {}), ...(originalUrl ? { originalUrl } : {}),
+        ...(csvOptions ? { csvOptions } : {}), ...(excel ? { excel } : {}),
+        ...(workbook ? { workbook } : {}), ...(workbookError ? { workbookError } : {})
+      })),
+      // Every Excel.Workbook call, including ones fed by a Folder.Files listing ("Combine files").
+      excelWorkbooks: inventory.excelWorkbooks ?? [],
+      // Files read through SharePoint/OneDrive/web connectors (mappedTo: the local copy used instead).
+      remoteReads: inventory.remoteReads ?? [],
+      ...(inventory.sourceMap?.length ? { sourceMap: inventory.sourceMap.map(({ from, to }) => ({ from, to })) } : {}),
       web: inventory.webSources ?? [],
       mParameters: inventory.mParameters ?? {},
       unresolved: inventory.unresolvedSources ?? [],

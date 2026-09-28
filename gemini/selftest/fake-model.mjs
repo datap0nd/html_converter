@@ -41,10 +41,13 @@ for (const element of document.querySelectorAll('[data-role="data"]')) {
 
 export function backendSource(inventory, digest, { broken = false, environmentIssue = false, leakTimer = false, placeholder = false, blockingQuery = false } = {}) {
   const csv = (digest?.sources?.directCsv ?? []).map(source => source.path);
+  // The first Excel sheet/table the report navigates to (headers promoted, as Power BI's generated M does).
+  const excel = (digest?.sources?.files ?? []).filter(source => source.reader === 'Excel.Workbook' && source.kind === 'file').flatMap(source => (source.excel?.items ?? []).filter(item => item.item).map(item => ({ path: source.path, item: item.item, kind: item.kind ?? 'Sheet', useHeaders: true })))[0] ?? null;
   const dataVisuals = inventory.pages.flatMap(page => page.visuals.filter(visual => visual.role === 'data').map(visual => visual.id));
   return `import fs from 'node:fs';
 import { tableRows } from './rows.mjs';
 const CSV_FILES = ${JSON.stringify(csv)};
+const EXCEL = ${JSON.stringify(excel)};
 const DATA_VISUALS = new Set(${JSON.stringify(dataVisuals)});
 export async function createBackend({ env, helpers }) {
   ${broken ? 'const broken = ;' : ''}
@@ -55,7 +58,7 @@ export async function createBackend({ env, helpers }) {
   return {
     async healthcheck() {
       ${environmentIssue ? "return { ok: false, issues: ['PG_PASSWORD is empty in .env (test scenario).'] };" : ''}
-      const issues = CSV_FILES.filter(file => !fs.existsSync(file)).map(file => 'Cannot read ' + file);
+      const issues = [...CSV_FILES, ...(EXCEL ? [EXCEL.path] : [])].filter(file => !fs.existsSync(file)).map(file => 'Cannot read ' + file);
       if (pool) {
         try { await pool.query('SELECT 1'); }
         catch (error) { issues.push('PostgreSQL ' + connections[0].server + ': ' + error.message); }
@@ -71,6 +74,10 @@ export async function createBackend({ env, helpers }) {
         const request = source.type === 'table' ? helpers.sources.postgresQuery(source.table.schema, source.table.item, limit) : helpers.sources.postgresNativeQuery(source.query.sql, limit, source.parameters);
         const result = await pool.query(request);
         return { rows: result.rows.slice(0, limit), columns: result.fields.map(field => field.name), placeholder: false, limitations: ['Test model output.'] };
+      }
+      if (!CSV_FILES.length && EXCEL) {
+        const table = helpers.excel.read(EXCEL.path, { item: EXCEL.item, kind: EXCEL.kind, useHeaders: EXCEL.useHeaders });
+        return { ...tableRows(table, limit), placeholder: false, limitations: ['Test model output.'] };
       }
       if (!CSV_FILES.length) return { rows: [], columns: [], placeholder: true, limitations: ['No CSV source in this fixture.'] };
       return { ...tableRows(helpers.core.readCsvFile(CSV_FILES[0]), limit), placeholder: false, limitations: ['Test model output.'] };
