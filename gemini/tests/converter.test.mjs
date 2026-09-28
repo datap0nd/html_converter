@@ -362,13 +362,16 @@ test('staged workspace never contains .env, data exports, caches, or cultures', 
   fs.mkdirSync(path.join(sandbox.input, 'data'), { recursive: true });
   fs.writeFileSync(path.join(sandbox.input, 'data', 'export.csv'), 'a\n1\n');
   fs.writeFileSync(path.join(sandbox.dir, '.env'), fs.readFileSync(path.join(sandbox.dir, '.env'), 'utf8') + 'PG_PASSWORD=never-share-this\n');
+  // A report folder left over from another project must not reach Gemini.
+  fs.cpSync(path.join(sandbox.input, 'Demo.Report'), path.join(sandbox.input, 'Old.Report'), { recursive: true });
   const result = await runConverter(sandbox, { scenario: 'list-stage' });
   assert.equal(result.code, 0, result.stdout);
   const state = JSON.parse(fs.readFileSync(path.join(sandbox.dir, 'fake-state.json'), 'utf8'));
   const { cwd: stage, files } = state.calls[0];
   assert.ok(files.includes('work/report-digest.json') && files.includes('GEMINI.md'));
   assert.ok(files.some(file => file.endsWith('tables/Sales.tmdl')));
-  for (const file of files) assert.doesNotMatch(file, /(^|\/)(\.env|data\/|\.pbi\/|cultures\/|diagramLayout\.json)/, `${file} must not be staged`);
+  for (const file of files) assert.doesNotMatch(file, /(^|\/)(\.env|data\/|\.pbi\/|cultures\/|diagramLayout\.json|Old\.Report\/)/, `${file} must not be staged`);
+  assert.match(result.stdout, /Ignored input\/Old\.Report: it is not the report or semantic model/);
   const stagedText = files.filter(file => !file.startsWith('prompts/') && !file.startsWith('skills/')).map(file => state.calls[0].contents?.[file] ?? '').join('');
   assert.doesNotMatch(stagedText, /never-share-this/);
   assert.equal(fs.existsSync(stage), false, 'temporary workspace is removed after the run');

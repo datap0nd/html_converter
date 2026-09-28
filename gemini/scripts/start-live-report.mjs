@@ -143,6 +143,15 @@ export function stagedInputAllowed(relativePath) {
   return true;
 }
 
+// Folders of other projects left in input/ (discover lists them as ignoredFolders) never reach Gemini.
+function ignoredInputPath(relativePath, inventory) {
+  const normalized = relativePath.replaceAll('\\', '/').toLowerCase();
+  return (inventory?.ignoredFolders ?? []).some(folder => {
+    const dir = String(folder).replaceAll('\\', '/').replace(/^input\//i, '').toLowerCase();
+    return dir && (normalized === dir || normalized.startsWith(`${dir}/`));
+  });
+}
+
 const STAGE_PREFIX = 'html-converter-gemini-';
 
 export const STAGE_SETTINGS = {
@@ -169,7 +178,7 @@ function createGeminiWorkspace(inventory, scope) {
       if (!relative) return true;
       if (fs.lstatSync(source).isSymbolicLink()) return false;
       if (/^data(?:\/|$)/i.test(relative)) return false;
-      if (!stagedInputAllowed(relative)) return false;
+      if (!stagedInputAllowed(relative) || ignoredInputPath(relative, inventory)) return false;
       if (!reportPathIsInScope(`/${relative}`, selectedPageIds)) return false;
       return fs.statSync(source).isDirectory() || /\.(?:pbip|pbir|pbism|tmdl|m|pq|bim|json)$/i.test(relative);
     }
@@ -775,7 +784,7 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
 
   const stateFile = path.join(scope.workDir, 'live-state.json');
   const selectedIds = new Set(inventory.pages.map(page => page.id));
-  const fingerprint = scopeFingerprint(inputFingerprint(inputDir, (relative, isDirectory) => isDirectory ? stagedInputAllowed(relative) : stagedInputAllowed(relative) && reportPathIsInScope(`/${relative}`, selectedIds)), inventory);
+  const fingerprint = scopeFingerprint(inputFingerprint(inputDir, (relative, isDirectory) => !ignoredInputPath(relative, inventory) && stagedInputAllowed(relative) && (isDirectory || reportPathIsInScope(`/${relative}`, selectedIds))), inventory);
   let state = readJson(stateFile);
   const hadState = state !== null;
   if (fresh || state?.version !== STATE_VERSION || state?.fingerprint !== fingerprint) {
