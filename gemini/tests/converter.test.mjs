@@ -281,11 +281,12 @@ const recoveries = [
   ['an older CLI without stream-json or --skip-trust still works', 'old-cli', ['01', '02', '03'], /does not support --output-format/],
   ['a rate limit waits and retries', 'quota-02', ['01', '02', '02', '03'], /rate limit\/capacity error\. Waiting/],
   ['a stalled attempt is stopped and retried', 'stall-01', ['01', '01', '02', '03'], /stopped as stalled/],
-  ['files written before a hang are accepted', 'hang-after-write-01', ['01', '02', '03'], /every required file was written\. Using them/]
+  ['files written before a hang are accepted', 'hang-after-write-01', ['01', '02', '03'], /every required file was written\. Using them/],
+  ['a query that freezes the backend is pinned to its visual and fixed', 'blocking-query', ['01', '02', '06', '03'], /v21 \(lineChart "Year over year" on page "Details"\): BLOCKED the process/]
 ];
 for (const [name, scenario, calls, message] of recoveries) {
   test(`end to end: ${name}`, withSandbox(async sandbox => {
-    const result = await runConverter(sandbox, { scenario, env: { GEMINI_IDLE_TIMEOUT_MINUTES: '0.04' } });
+    const result = await runConverter(sandbox, { scenario, env: { GEMINI_IDLE_TIMEOUT_MINUTES: '0.04', HC_QUERY_TIMEOUT_MINUTES: '0.05' } });
     assert.equal(result.code, 0, result.stdout);
     assert.deepEqual(result.calls, calls);
     assert.match(result.stdout, message);

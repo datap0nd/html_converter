@@ -39,43 +39,53 @@ for (const element of document.querySelectorAll('[data-role="data"]')) {
 `;
 }
 
-export function backendSource(inventory, digest, { broken = false, environmentIssue = false, leakTimer = false, placeholder = false } = {}) {
+export function backendSource(inventory, digest, { broken = false, environmentIssue = false, leakTimer = false, placeholder = false, blockingQuery = false } = {}) {
   const csv = (digest?.sources?.directCsv ?? []).map(source => source.path);
-  const postgres = digest?.sources?.postgres ?? [];
   const dataVisuals = inventory.pages.flatMap(page => page.visuals.filter(visual => visual.role === 'data').map(visual => visual.id));
   return `import fs from 'node:fs';
+import { tableRows } from './rows.mjs';
 const CSV_FILES = ${JSON.stringify(csv)};
-const POSTGRES = ${JSON.stringify(postgres)};
 const DATA_VISUALS = new Set(${JSON.stringify(dataVisuals)});
 export async function createBackend({ env, helpers }) {
   ${broken ? 'const broken = ;' : ''}
   ${leakTimer ? 'setInterval(() => {}, 1000);' : ''}
-  const sources = POSTGRES.length ? helpers.sources.listLiveSources({ postgresSources: POSTGRES }, env) : [];
+  const connections = helpers.postgres.connections;
+  const sources = connections.length ? helpers.sources.listLiveSources({ postgresSources: connections }, env) : [];
+  const pool = connections.length ? helpers.postgres.createPool(connections[0]) : null;
   return {
     async healthcheck() {
       ${environmentIssue ? "return { ok: false, issues: ['PG_PASSWORD is empty in .env (test scenario).'] };" : ''}
       const issues = CSV_FILES.filter(file => !fs.existsSync(file)).map(file => 'Cannot read ' + file);
-      for (const connection of POSTGRES) {
-        try { await helpers.sources.testPostgresConnection(connection, env); }
-        catch (error) { issues.push('PostgreSQL ' + connection.server + ': ' + error.message); }
+      if (pool) {
+        try { await pool.query('SELECT 1'); }
+        catch (error) { issues.push('PostgreSQL ' + connections[0].server + ': ' + error.message); }
       }
-      return issues.length ? { ok: false, issues } : { ok: true, sources: [...CSV_FILES, ...POSTGRES.map(item => item.server + '/' + item.database)] };
+      return issues.length ? { ok: false, issues } : { ok: true, sources: [...CSV_FILES, ...connections.map(item => item.server + '/' + item.database)] };
     },
-    async query({ visualId, limit = 200 }) {
+    async query({ visualId, limit = 2000 }) {
       if (!DATA_VISUALS.has(visualId)) throw new Error('Unknown visual ' + visualId);
+      ${blockingQuery ? "if (visualId === [...DATA_VISUALS].at(-1)) { for (;;) {} }" : ''}
       ${placeholder ? "if (visualId === [...DATA_VISUALS][0]) return { rows: [], columns: [], placeholder: true, limitations: ['Custom visual runtime is not available (test scenario).'] };" : ''}
       if (sources.length) {
-        const page = await helpers.sources.fetchLivePage(sources[0], env, { limit: Math.min(limit, 200), offset: 0 });
-        return { rows: page.rows, columns: page.columns, placeholder: false, limitations: ['Test model output.'] };
+        const source = sources[0];
+        const request = source.type === 'table' ? helpers.sources.postgresQuery(source.table.schema, source.table.item, limit) : helpers.sources.postgresNativeQuery(source.query.sql, limit, source.parameters);
+        const result = await pool.query(request);
+        return { rows: result.rows.slice(0, limit), columns: result.fields.map(field => field.name), placeholder: false, limitations: ['Test model output.'] };
       }
       if (!CSV_FILES.length) return { rows: [], columns: [], placeholder: true, limitations: ['No CSV source in this fixture.'] };
-      const parsed = helpers.core.readCsvFile(CSV_FILES[0]);
-      return { rows: parsed.rows.slice(0, limit), columns: parsed.columns, placeholder: false, limitations: ['Test model output.'] };
-    }
+      return { ...tableRows(helpers.core.readCsvFile(CSV_FILES[0]), limit), placeholder: false, limitations: ['Test model output.'] };
+    },
+    async close() { await pool?.end(); }
   };
 }
 `;
 }
+
+// A module of the model's own next to backend.mjs; it must travel with the report.
+export const rowsModule = `export function tableRows(parsed, limit) {
+  return { rows: parsed.rows.slice(0, limit), columns: parsed.columns };
+}
+`;
 
 // scenario: comma-separated switches, e.g. "broken-backend,review-blocked".
 // counts: how many times each phase ran before this call (0 on the first call).
@@ -97,7 +107,8 @@ export function phaseFiles({ prompt, cwd, scenario = '', count = 0 }) {
       break;
     case '02':
       add('output/dynamic/index.html', reportHtml(inventory, { omitVisualIds: switches.has('missing-visual') && lastData ? [lastData.id] : [] }));
-      add('output/dynamic/backend.mjs', backendSource(inventory, digest, { broken: switches.has('broken-backend'), environmentIssue: switches.has('environment-issue'), leakTimer: switches.has('leak-timer'), placeholder: switches.has('placeholder') }));
+      add('output/dynamic/backend.mjs', backendSource(inventory, digest, { broken: switches.has('broken-backend'), environmentIssue: switches.has('environment-issue'), leakTimer: switches.has('leak-timer'), placeholder: switches.has('placeholder'), blockingQuery: switches.has('blocking-query') }));
+      add('output/dynamic/rows.mjs', rowsModule);
       add(artifact, { implemented: dataVisuals.map(visual => visual.id), placeholders: [], limitations: [], sourcePaths: [], credentialsNeeded: [], filtersContract: {} });
       break;
     case '03':

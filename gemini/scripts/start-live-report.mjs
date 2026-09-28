@@ -1,8 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import http from 'node:http';
 import os from 'node:os';
-import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import vm from 'node:vm';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -13,6 +11,8 @@ import { inputFingerprint, captureArtifacts, artifactsMatch, saveCheckpoint } fr
 import { buildReportDigest, DIGEST_VERSION } from './digest.mjs';
 import { testPostgresConnection, postgresHint, listLiveSources } from './sources.mjs';
 import { log, startLogFile, currentLogFile, addSecretsFromEnv, redact, formatDuration } from './log.mjs';
+import { checkBackend, loadBackend, closeBackend, classifyBackendIssue, issueText, BACKEND_CONTRACT, QUERY_ROW_LIMIT } from './backend-check.mjs';
+import { startReportServer } from './server.mjs';
 
 const MODEL = 'gemini-3.8-flash';
 const STATE_VERSION = 2;
@@ -574,139 +574,24 @@ async function runPhase([name, promptFile, expectedFile], ctx) {
 
 // ---------- generated backend self-check ----------
 
-function withTimeout(promise, ms, label) {
-  let timer;
-  return Promise.race([
-    Promise.resolve(promise).finally(() => clearTimeout(timer)),
-    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} did not finish within ${formatDuration(ms)}.`)), ms); })
-  ]);
-}
+export { classifyBackendIssue };
 
-const ENVIRONMENT_ISSUE = /PG_USER|PG_PASSWORD|\.env|credential|password authentication failed|28P01|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|getaddrinfo|Connection terminated|timeout expired|self[- ]signed|unable to (?:get|verify) (?:local )?issuer|UNABLE_TO_VERIFY_LEAF_SIGNATURE|certificate|pg_hba\.conf|3D000|42501|permission denied|EACCES|EPERM|network (?:path|name)|VPN/i;
-
-export function classifyBackendIssue(message) {
-  const text = String(message ?? '');
-  if (/SyntaxError|ReferenceError|TypeError|is not a function|is not defined|Cannot find (?:package|module)|ERR_MODULE_NOT_FOUND|does not provide an export|Unexpected token|must export|must provide|did not return a rows array|42601|42703|42P01|42883|syntax error at or near|column .* does not exist|relation .* does not exist/i.test(text)) return 'code';
-  if (ENVIRONMENT_ISSUE.test(text)) return 'environment';
-  return 'code';
-}
-
-function issueText(value) {
-  if (typeof value === 'string') return value;
-  if (value instanceof Error) return value.message;
-  if (value && typeof value === 'object') return value.message ?? value.issue ?? value.error ?? JSON.stringify(value);
-  return String(value);
-}
-
-async function backendHelpers() {
-  return {
-    core: await import('./core.mjs'),
-    sources: await import('./sources.mjs'),
-    loadPg: async () => (await import('pg')).default
-  };
-}
-
-export async function selfCheckBackend(backendFile, inventory, env, { timeoutMs = 90_000 } = {}) {
-  const issues = [], placeholders = [], visuals = [];
-  const add = (stage, message, visualId = null) => issues.push({ stage, ...(visualId ? { visualId } : {}), message: redact(message).slice(0, 2000), kind: classifyBackendIssue(message) });
-  if (!fs.existsSync(backendFile)) { add('files', 'output/dynamic/backend.mjs is missing.'); return { ok: false, issues, placeholders, visuals }; }
-  const syntax = spawnSync(process.execPath, ['--check', backendFile], { encoding: 'utf8', timeout: 60_000, windowsHide: true });
-  if (syntax.status !== 0) { add('syntax', `SyntaxError in backend.mjs: ${(syntax.stderr || syntax.stdout || '').trim().split(/\r?\n/).slice(0, 8).join('\n')}`); return { ok: false, issues, placeholders, visuals }; }
-  let backend;
-  try {
-    const module = await withTimeout(import(`${pathToFileURL(backendFile).href}?check=${Date.now()}`), 30_000, 'Importing backend.mjs');
-    if (typeof module.createBackend !== 'function') throw new Error('backend.mjs must export createBackend({env, root, inputDir, helpers}).');
-    backend = await withTimeout(module.createBackend({ env, root, inputDir, helpers: await backendHelpers() }), 60_000, 'createBackend()');
-    if (!backend || typeof backend.query !== 'function' || typeof backend.healthcheck !== 'function') throw new Error('createBackend() must return an object with query() and healthcheck() functions.');
-  } catch (error) {
-    add('load', `${error.message}${error.code ? ` (${error.code})` : ''}`);
-    return { ok: false, issues, placeholders, visuals };
-  }
-  let health;
-  try { health = await withTimeout(backend.healthcheck(), timeoutMs, 'healthcheck()'); }
-  catch (error) { add('healthcheck', `healthcheck() threw: ${error.message}`); return { ok: false, issues, placeholders, visuals, backend }; }
-  if (!health || health.ok !== true) {
-    const list = Array.isArray(health?.issues) && health.issues.length ? health.issues : ['healthcheck() did not return {ok:true}.'];
-    for (const item of list) add('healthcheck', issueText(item));
-    return { ok: false, issues, placeholders, visuals, backend, health };
-  }
-  for (const page of inventory.pages) for (const visual of page.visuals.filter(v => v.role === 'data')) {
-    const started = Date.now();
-    try {
-      const result = await withTimeout(backend.query({ visualId: visual.id, filters: {}, limit: 200 }), timeoutMs, `query(${visual.id})`);
-      if (!result || !Array.isArray(result.rows)) { add('query', `query() for ${visual.id} did not return a rows array.`, visual.id); continue; }
-      if (result.placeholder === true) placeholders.push({ visualId: visual.id, page: page.name, type: visual.type, title: visual.title, limitations: (result.limitations ?? []).map(issueText) });
-      visuals.push({ visualId: visual.id, rowCount: result.rows.length, placeholder: result.placeholder === true, ms: Date.now() - started });
-    } catch (error) { add('query', `query() for ${visual.id} (${visual.type}${visual.title ? ` "${visual.title}"` : ''}) failed: ${error.message}`, visual.id); }
-  }
-  return { ok: issues.length === 0, issues, placeholders, visuals, backend, health };
-}
-
-// Generated backends may hold database pools; release one that is being replaced.
-async function closeBackend(backend) {
-  if (typeof backend?.close !== 'function') return;
-  try { await withTimeout(backend.close(), 10_000, 'backend.close()'); } catch { /* best effort */ }
-}
-
-// ---------- serving ----------
-
-function listen(server, port) {
-  return new Promise((resolve, reject) => {
-    const onError = error => { server.off('listening', onListening); reject(error); };
-    const onListening = () => { server.off('error', onError); resolve(server.address().port); };
-    server.once('error', onError);
-    server.once('listening', onListening);
-    server.listen(port, '127.0.0.1');
+// Runs backend.mjs in a separate checker process (syntax, import, createBackend,
+// healthcheck, every data visual query) and logs each step as it happens.
+export async function selfCheckBackend(backendFile, inventory, env, { digest = null, ...options } = {}) {
+  return checkBackend({
+    backendFile, root, inputDir, env, inventory, digest,
+    totalTimeoutMs: minutesSetting(env, 'HC_BACKEND_CHECK_MINUTES', 15),
+    perQueryTimeoutMs: minutesSetting(env, 'HC_QUERY_TIMEOUT_MINUTES', 1.5),
+    ...options,
+    onProgress: (text, meta = {}) => (meta.level === 'warn' ? log.warn : log.info)('self-check', text),
+    onOutput: (line, stream) => log.detail('self-check', `backend ${stream}: ${line}`)
   });
 }
 
-export async function startServer(htmlFile, backend, inventory, { port = 8765, attempts = 10 } = {}) {
-  const visualIds = new Set(inventory.pages.flatMap(page => page.visuals.map(visual => visual.id)));
-  let origins = new Set();
-  const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-    const headers = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
-    if (req.method !== 'GET' || (req.headers.origin && !origins.has(req.headers.origin))) { res.writeHead(403, headers); res.end(); return; }
-    if (url.pathname === '/' || url.pathname === '/index.html') {
-      res.writeHead(200, { ...headers, 'Content-Type': 'text/html; charset=utf-8' });
-      fs.createReadStream(htmlFile).pipe(res);
-      return;
-    }
-    if (url.pathname === '/api/report') {
-      const started = Date.now();
-      const visualId = url.searchParams.get('visual');
-      try {
-        if (!visualIds.has(visualId)) throw new Error('Unknown visual ID.');
-        const filters = JSON.parse(url.searchParams.get('filters') ?? '{}');
-        if (!filters || Array.isArray(filters) || typeof filters !== 'object') throw new Error('Filters must be an object.');
-        const result = await withTimeout(backend.query({ visualId, filters, limit: 2000 }), 120_000, `query(${visualId})`);
-        if (!result || !Array.isArray(result.rows)) throw new Error('Backend returned invalid data.');
-        res.writeHead(200, { ...headers, 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify(result, (_key, value) => typeof value === 'bigint' ? value.toString() : value));
-        log.detail('server', `GET /api/report visual=${visualId} rows=${result.rows.length} ${Date.now() - started}ms`);
-      } catch (error) {
-        const message = redact(error.message);
-        log.warn('server', `Visual ${visualId}: ${message}`);
-        res.writeHead(400, { ...headers, 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ error: message }));
-      }
-      return;
-    }
-    res.writeHead(404, headers); res.end('Not found');
-  });
-  let bound = null, lastError = null;
-  for (let candidate = port; candidate < port + attempts; candidate++) {
-    try { bound = await listen(server, candidate); break; }
-    catch (error) {
-      lastError = error;
-      if (error.code !== 'EADDRINUSE' && error.code !== 'EACCES') break;
-      log.warn('server', `Port ${candidate} is in use (probably an earlier report window still running); trying ${candidate + 1}.`);
-    }
-  }
-  if (bound === null) throw new ConversionError(`Could not start the local report server: ${lastError?.message}`, { hint: 'Close other report windows (Ctrl+C) or set HC_PORT in gemini/.env to a free port.' });
-  origins = new Set([`http://127.0.0.1:${bound}`, `http://localhost:${bound}`]);
-  server.on('error', error => log.error('server', `Live server error: ${error.message}`));
-  return { server, url: `http://127.0.0.1:${bound}/`, port: bound };
+function minutesSetting(env, key, fallback) {
+  const value = Number(env?.[key]);
+  return (Number.isFinite(value) && value > 0 ? value : fallback) * 60 * 1000;
 }
 
 // ---------- one conversion per scope ----------
@@ -912,7 +797,7 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
     const runFix = async request => {
       fixCounter++;
       state.fixRounds = fixCounter;
-      writeJson(path.join(stage, 'work', 'fix-request.json'), { ...request, round: fixCounter, backendContract: 'createBackend({env, root, inputDir, helpers}) -> {healthcheck(), query({visualId, filters, limit})}' });
+      writeJson(path.join(stage, 'work', 'fix-request.json'), { ...request, round: fixCounter, backendContract: BACKEND_CONTRACT });
       await runPhase([`06-fix-${fixCounter}`, 'prompts/live-06-fix.md', `work/fix-result-${fixCounter}.json`], ctx);
       markOutputsChanged();
     };
@@ -924,24 +809,23 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
       if (lastCheck?.ok && lastCheck.hash === outputsHash() && lastCheck.coverage === coverage && (!lastCheck.placeholders.length || state.placeholderFixDone)) return lastCheck;
       for (let round = 0; ; round++) {
         log.info('self-check', `Checking the generated report (${reason}): HTML, backend syntax and import, source healthcheck, and every data visual query...`);
-        const check = await selfCheckBackend(backendFile, inventory, env);
+        const check = await selfCheckBackend(backendFile, inventory, env, { digest });
         const htmlIssues = staticReportIssues(inventory, fs.existsSync(htmlFile) ? fs.readFileSync(htmlFile, 'utf8') : '', env, { coverage }).map(message => ({ stage: 'html', message, kind: 'code' }));
         check.issues.push(...htmlIssues);
         check.ok = check.ok && !htmlIssues.length;
         check.hash = outputsHash();
         check.coverage = coverage;
-        await closeBackend(lastCheck?.backend);
         lastCheck = check;
-        const selfcheckReport = { checkedAt: new Date().toISOString(), reason, ok: check.ok, issues: check.issues, placeholders: check.placeholders, suspicious: check.suspicious ?? [], visuals: check.visuals };
+        const selfcheckReport = { checkedAt: new Date().toISOString(), reason, ok: check.ok, issues: check.issues, placeholders: check.placeholders, suspicious: check.suspicious ?? [], visuals: check.visuals, health: check.health, durationMs: check.durationMs };
         writeJson(path.join(scope.workDir, 'live-selfcheck.json'), selfcheckReport);
         // Reviewers and fix phases read the real results from their workspace.
         writeJson(path.join(stage, 'work', 'live-selfcheck.json'), selfcheckReport);
         const environment = check.issues.filter(issue => issue.kind === 'environment');
         const code = check.issues.filter(issue => issue.kind === 'code');
-        log.info('self-check', `${check.visuals.length} visual query(ies) answered, ${check.placeholders.length} placeholder(s), ${code.length} code issue(s), ${environment.length} source-access issue(s).`);
-        for (const issue of check.issues.slice(0, 12)) log.warn('self-check', `${issue.stage}${issue.visualId ? ` ${issue.visualId}` : ''}: ${issue.message.split('\n')[0]}`);
+        for (const issue of check.issues.slice(0, 12)) log.warn('self-check', `${issue.kind === 'environment' ? 'source access' : 'code'} (${issue.stage}${issue.visualId ? ` ${issue.visualId}` : ''}): ${issue.message.split('\n')[0]}`);
         if (environment.length && !code.length) {
-          throw new ConversionError(`The generated backend cannot reach the report's data: ${environment.map(issue => issue.message.split('\n')[0]).slice(0, 3).join(' | ')}`, { phase: 'self-check', hint: `${postgresHint(environment[0].message)} Gemini's work is saved; after fixing this, rerun .\\setup.ps1 and it resumes at this check.` });
+          const hints = [...new Set(environment.map(issue => issue.hint).filter(Boolean))];
+          throw new ConversionError(`The generated backend cannot reach the report's data: ${environment.map(issue => issue.message.split('\n')[0]).slice(0, 3).join(' | ')}`, { phase: 'self-check', hint: `${hints.length ? hints.slice(0, 2).join(' ') : postgresHint(environment[0].message)} Gemini's work is saved; after fixing this, rerun .\\setup.ps1 and it resumes at this check.` });
         }
         // Placeholders get one fix round per build; afterwards they are served, labeled, and listed.
         const needsFix = code.length || (check.placeholders.length && !state.placeholderFixDone);
@@ -1049,7 +933,7 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
       }
     } finally { removeGeminiWorkspace(stage); }
   }
-  if (!checked) checked = await selfCheckBackend(backendFile, inventory, env);
+  if (!checked) checked = await selfCheckBackend(backendFile, inventory, env, { digest });
   const review = currentReview(scope, state) ?? {};
   const issues = validateLiveReport(inventory, fs.readFileSync(htmlFile, 'utf8'), env.HC_ALLOW_BLOCKED_REVIEW === 'true' ? { ...review, status: 'warnings' } : review, env);
   writeJson(path.join(scope.workDir, 'live-validation.json'), { passed: issues.length === 0, issues, reviewStatus: review?.status });
@@ -1060,9 +944,25 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
   const unverified = asArray(review.unverified);
   log.info('review', `Gemini review: ${review.status}. ${limitations.length} limitation(s), ${unverified.length} unverified behavior(s).`);
   for (const placeholder of checked.placeholders) log.warn('review', `Visual ${placeholder.visualId} (${placeholder.type}${placeholder.title ? ` "${placeholder.title}"` : ''}) on "${placeholder.page}" is an explicit placeholder: ${placeholder.limitations.join('; ') || 'no reason given'}`);
-  if (!serve) return { inventory, review, backend: checked.backend };
+  if (!serve) return { inventory, review, check: checked };
+  // The checker process proved this backend works; the server now runs it in this process.
+  let backend;
+  try {
+    backend = await loadBackend({ backendFile, root, inputDir, env, inventory, digest, onPoolError: error => log.warn('server', `A PostgreSQL connection dropped and will be reopened on the next request: ${redact(error?.message ?? String(error))}`) });
+  } catch (error) {
+    throw new ConversionError(`The report backend passed its check but could not be started for serving: ${error.message}`, { phase: 'serve', hint: 'Rerun .\\setup.ps1; if it happens again, run with --fresh to rebuild the report.' });
+  }
   const requestedPort = Number(port ?? env.HC_PORT ?? 8765);
-  const { server, url } = await startServer(htmlFile, checked.backend, inventory, { port: Number.isInteger(requestedPort) && requestedPort >= 0 ? requestedPort : 8765 });
+  let server, url;
+  try {
+    ({ server, url } = await startReportServer({ dynamicDir: scope.dynamicDir, backend, inventory, port: Number.isInteger(requestedPort) && requestedPort > 0 && requestedPort < 65536 ? requestedPort : 8765, limit: QUERY_ROW_LIMIT, queryTimeoutMs: minutesSetting(env, 'HC_QUERY_TIMEOUT_MINUTES', 1.5) + 30_000, log, redact }));
+  } catch (error) {
+    await closeBackend(backend);
+    throw new ConversionError(error.message, { phase: 'serve', hint: 'Close other report windows (Ctrl+C) or set HC_PORT in gemini/.env to a free port.' });
+  }
+  const shutdown = () => { server.close(); closeBackend(backend).finally(() => process.exit(0)); setTimeout(() => process.exit(0), 5000).unref(); };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
   log.info(null, '============================================================');
   log.info(null, `REPORT READY: ${url}`);
   log.info(null, `Open the address above in the browser; the HTML file alone cannot load data. Files: ${scope.dynamicDir}`);

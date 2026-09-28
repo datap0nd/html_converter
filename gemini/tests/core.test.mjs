@@ -263,7 +263,7 @@ test('live PostgreSQL path pages native SQL without embedding credentials or all
   assert.deepEqual(page.rows, [{ value: 1 }, { value: 2 }]);
   assert.equal(page.hasMore, true);
   assert.equal(JSON.stringify(page).includes('private-password'), false);
-  await assert.rejects(fetchLivePage(source, env, { limit: 1000 }, { Client: FakeClient }), /1–200/);
+  await assert.rejects(fetchLivePage(source, env, { limit: 5001 }, { Client: FakeClient }), /1–5000/);
 });
 
 test('live preview writes source browser but no credentials or data', () => {
