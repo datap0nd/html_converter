@@ -933,6 +933,12 @@ function readLines(stream, onLine) {
   stream.on('end', () => { if (partial.trim()) onLine(partial.slice(0, 2000)); });
 }
 
+// Certificate and memory flags the converter was started with (setup adds --use-system-ca
+// where Node supports it), so the check reaches TLS sources exactly like preflight and the server.
+function inheritedNodeFlags() {
+  return process.execArgv.filter(arg => /^--(?:use-system-ca|use-openssl-ca|use-bundled-ca|no-warnings|max-old-space-size=\d+|dns-result-order=[\w-]+|tls-[\w-]+(?:=\S+)?|openssl-[\w-]+(?:=\S+)?)$/.test(arg));
+}
+
 function childEnvironment() {
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
@@ -945,7 +951,7 @@ function runCheckChild({ input, cwd, deadline, graceMs, noticeMs, onMessage, onL
     const stderrTail = [];
     let killReason = null, settled = false, lingerTimer = null, child;
     try {
-      child = spawn(process.execPath, [thisFile, CHILD_FLAG], { cwd, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true, env: childEnvironment() });
+      child = spawn(process.execPath, [...inheritedNodeFlags(), thisFile, CHILD_FLAG], { cwd, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true, env: childEnvironment() });
     } catch (error) {
       resolve({ spawnError: error, inFlight: [], stderrTail, killReason });
       return;

@@ -10,7 +10,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+# Corporate proxies that require Windows sign-in answer 407 unless the default credentials are sent.
+try {
+    $defaultProxy = [System.Net.WebRequest]::DefaultWebProxy
+    if ($defaultProxy) { $defaultProxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials }
+} catch { }
 $geminiDir = [System.IO.Path]::GetFullPath($PSScriptRoot)
 $logsDir = Join-Path $geminiDir 'logs'
 $liveScript = Join-Path $geminiDir 'live-setup.ps1'
@@ -19,12 +24,13 @@ $userAgent = 'html_converter-setup'
 $exitCode = 0
 $transcriptStarted = $false
 $candidate = $null
+$logPath = $null
 if ($SkipUpdate) { $NoPause = $true }
 
 function Assert-LiveScript {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Live setup script not found: $Path" }
-    $info = Get-Item -LiteralPath $Path
+    $info = Get-Item -LiteralPath $Path -Force
     if ($info.Length -lt 100 -or $info.Length -gt 262144) { throw 'Live setup script has an unexpected size.' }
     $firstLine = Get-Content -LiteralPath $Path -TotalCount 1
     if ($firstLine -ne '# html_converter-live-setup') { throw 'Downloaded content is not the expected live-setup.ps1.' }
@@ -32,6 +38,17 @@ function Assert-LiveScript {
     $errors = $null
     [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors) | Out-Null
     if ($errors.Count) { throw "Downloaded live-setup.ps1 has invalid PowerShell syntax: $($errors[0].Message)" }
+}
+
+# The PowerShell engine program, never the host process: under PowerShell ISE the host is
+# powershell_ise.exe, which would open live-setup.ps1 in an editor instead of running it.
+function Get-PowerShellPath {
+    $names = if ($PSVersionTable.PSEdition -eq 'Core') { @('pwsh.exe', 'pwsh') } else { @('powershell.exe') }
+    foreach ($name in $names) {
+        $candidatePath = Join-Path $PSHOME $name
+        if (Test-Path -LiteralPath $candidatePath -PathType Leaf) { return $candidatePath }
+    }
+    throw "Could not find $($names[0]) in $PSHOME."
 }
 
 function Get-LatestCommit {
@@ -99,9 +116,9 @@ function Get-LiveScriptFromArchive {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = [System.IO.Compression.ZipFile]::OpenRead($archiveFile)
     try {
-        $matches = @($archive.Entries | Where-Object { $_.FullName.Replace('\', '/') -match '^[^/]+/gemini/live-setup\.ps1$' })
-        if ($matches.Count -ne 1) { throw 'Archive must contain exactly one gemini/live-setup.ps1.' }
-        $inputStream = $matches[0].Open()
+        $found = @($archive.Entries | Where-Object { $_.FullName.Replace('\', '/') -match '^[^/]+/gemini/live-setup\.ps1$' })
+        if ($found.Count -ne 1) { throw 'Archive must contain exactly one gemini/live-setup.ps1.' }
+        $inputStream = $found[0].Open()
         try {
             $outputStream = [System.IO.File]::Create($Destination)
             try { $inputStream.CopyTo($outputStream) } finally { $outputStream.Dispose() }
@@ -111,16 +128,27 @@ function Get-LiveScriptFromArchive {
 }
 
 try {
-    New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
+    [void][System.IO.Directory]::CreateDirectory($logsDir)
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $logPath = Join-Path $logsDir "setup-$stamp-$PID.log"
     Set-Content -LiteralPath (Join-Path $logsDir 'latest.txt') -Value $logPath
-    Start-Transcript -LiteralPath $logPath -Force | Out-Null
-    $transcriptStarted = $true
-    Write-Host "html_converter setup log: $logPath" -ForegroundColor Cyan
+    try {
+        Start-Transcript -LiteralPath $logPath -Force | Out-Null
+        $transcriptStarted = $true
+        Write-Host "html_converter setup log: $logPath" -ForegroundColor Cyan
+    } catch {
+        Write-Host "Note: the setup log could not be started ($($_.Exception.Message)); continuing without it." -ForegroundColor Yellow
+    }
     if (-not (Test-Path -LiteralPath (Join-Path $geminiDir 'package.json'))) {
         throw 'Run setup.ps1 from the html_converter/gemini folder.'
     }
+    if ($Host.Name -eq 'Windows PowerShell ISE Host') {
+        throw 'Run setup.ps1 from a normal PowerShell window, not PowerShell ISE: open Windows PowerShell, cd to this gemini folder, and run .\setup.ps1'
+    }
+    # Relative paths are relative to the PowerShell location ($PWD), not the process directory that
+    # [IO.Path]::GetFullPath uses; the child gets absolute paths.
+    if ($ArchivePath) { $ArchivePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ArchivePath) }
+    if ($LiveScriptPath) { $LiveScriptPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LiveScriptPath) }
 
     if ($SkipUpdate) {
         Write-Host 'Continuing the update started by the previous installer.' -ForegroundColor Cyan
@@ -154,33 +182,56 @@ try {
         }
     }
 
-    $shell = (Get-Process -Id $PID).Path
+    $shell = Get-PowerShellPath
     $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $liveScript)
     if ($NoRun) { $arguments += '-NoRun' }
     if ($ArchivePath) { $arguments += @('-ArchivePath', $ArchivePath) }
     if ($SkipUpdate) { $arguments += '-SkipUpdate' }
     if ($sha -and -not $ArchivePath -and -not $SkipUpdate) { $arguments += @('-CommitSha', $sha) }
     # Native stderr must not become a terminating error under 'Stop' in Windows PowerShell 5.1.
+    # The child's colours are lost in the pipe, so failures and warnings are coloured again here.
     $ErrorActionPreference = 'Continue'
-    & $shell @arguments 2>&1 | ForEach-Object {
-        if ($_ -is [System.Management.Automation.ErrorRecord]) { Write-Host $_.Exception.Message } else { Write-Host $_ }
+    try {
+        & $shell @arguments 2>&1 | ForEach-Object {
+            $line = if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { [string]$_ }
+            if ($line -match '^\s*SETUP FAILED|CONVERSION STOPPED|ERROR:|ERROR \d+ \(0x') {
+                Write-Host $line -ForegroundColor Red
+            } elseif ($line -match 'WARNING') {
+                Write-Host $line -ForegroundColor Yellow
+            } else {
+                Write-Host $line
+            }
+        }
+        $childExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = 'Stop'
     }
-    $exitCode = $LASTEXITCODE
-    $ErrorActionPreference = 'Stop'
-    if ($exitCode -ne 0) { throw "live-setup.ps1 exited with code $exitCode." }
-    Write-Host 'Setup finished successfully.' -ForegroundColor Green
+    if ($childExit -ne 0) {
+        # live-setup.ps1 already printed the reason and the log to send as its last lines.
+        $exitCode = 1
+        Write-Host 'Setup stopped. The reason is shown above.' -ForegroundColor Red
+    } else {
+        Write-Host 'Setup finished successfully.' -ForegroundColor Green
+    }
 } catch {
     $exitCode = 1
     Write-Host "SETUP FAILED: $($_.Exception.Message)" -ForegroundColor Red
 } finally {
-    if ($candidate -and (Test-Path -LiteralPath $candidate)) { Remove-Item -LiteralPath $candidate -Force }
+    # Cleanup must never turn a result into a different one or skip the log and the pause.
+    if ($candidate) {
+        try {
+            if (Test-Path -LiteralPath $candidate) { Remove-Item -LiteralPath $candidate -Force -ErrorAction Stop }
+        } catch {
+            Write-Host "Note: could not delete $candidate ($($_.Exception.Message))." -ForegroundColor DarkGray
+        }
+    }
     if ($transcriptStarted) {
         Write-Host "Full setup log: $logPath" -ForegroundColor Cyan
-        Stop-Transcript | Out-Null
+        try { Stop-Transcript | Out-Null } catch { }
         Write-Host "Log saved: $logPath" -ForegroundColor Cyan
     }
     if (-not $NoPause) {
-        try { [void](Read-Host 'Press Enter to close this window') } catch {}
+        try { [void](Read-Host 'Press Enter to close this window') } catch { }
     }
 }
 exit $exitCode
