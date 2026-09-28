@@ -10,6 +10,7 @@ import { pathToFileURL } from 'node:url';
 import { createSandbox, fixturesDir, geminiDir } from '../selftest/sandbox.mjs';
 import { parseTmdl } from '../scripts/tmdl.mjs';
 import { resolveMText, callArguments, stripMComments, mUnescape, readCsvFile, scanModelSources } from '../scripts/core.mjs';
+import { digestText } from '../scripts/digest.mjs';
 
 const expected = name => JSON.parse(fs.readFileSync(path.join(fixturesDir, '_expected', `${name}.json`), 'utf8'));
 const fakeCli = path.join(geminiDir, 'selftest', 'fake-gemini-cli.mjs');
@@ -84,7 +85,8 @@ test('EdgeCases: parameterised sources resolve through literal M parameters', ()
   assert.deepEqual(files['stores_eu.csv'].csvOptions, { delimiter: ';', encoding: 1252 });
   assert.equal(files['targets.xlsx'].reader, 'Excel.Workbook');
   assert.deepEqual(inventory.unsupportedConnectors.map(item => item.connector).sort(), ['Excel.Workbook', 'Sql.Database', 'Web.Contents']);
-  assert.deepEqual(inventory.problems, []);
+  assert.equal(inventory.problems.length, 1, inventory.problems.join('\n'));
+  assert.match(inventory.problems[0], /^Page folder 4c59645e8e12373532b8 .* is not listed in pages\.json; it is placed after the listed pages/);
 }));
 
 test('EdgeCases: the digest keeps calculation groups, report-level and formatting-only measures', () => inSandbox('EdgeCases', ({ sandbox }) => {
@@ -92,7 +94,7 @@ test('EdgeCases: the digest keeps calculation groups, report-level and formattin
   const digest = JSON.parse(fs.readFileSync(path.join(sandbox.dir, 'work', 'scopes', 'first-2-pages', 'report-digest.json'), 'utf8'));
   const tables = Object.fromEntries(digest.model.tables.map(table => [table.name, table]));
   assert.deepEqual(tables['Time Intelligence'].calculationGroup.items.map(item => item.name), ['Current', 'YTD', 'Prior Year']);
-  assert.match(tables['Time Intelligence'].calculationGroup.items[1].expression, /DATESYTD/);
+  assert.match(digestText(tables['Time Intelligence'].calculationGroup.items[1].expression), /^CALCULATE\(\n    SELECTEDMEASURE\(\),\n    DATESYTD/);
   assert.ok(tables['Fact Sales'].measures.some(measure => measure.name === 'Sales Label (report)' && measure.reportLevel), 'report-level measure from reportExtensions.json');
   assert.deepEqual(tables._Measures.measures.map(measure => measure.name).sort(), ['Button Text', 'Title Text'], 'measures bound to a title and button text');
   assert.ok(tables['LocalDateTable_5cb33fe7-583b-4a68-924e-fc66e315fc0e'].hidden);

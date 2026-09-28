@@ -4,11 +4,11 @@ import os from 'node:os';
 import { createHash } from 'node:crypto';
 import vm from 'node:vm';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { root, inputDir, workDir, dynamicDir, discover, writeJson, readJson } from './core.mjs';
+import { root, inputDir, workDir, dynamicDir, discover, checkSourceAvailability, writeJson, readJson } from './core.mjs';
 import { loadLocalEnv } from './env.mjs';
 import { runGeminiStream, geminiCliInfo, toolTarget, unsupportedFlag, formatBytes } from './gemini.mjs';
 import { inputFingerprint, captureArtifacts, artifactsMatch, saveCheckpoint } from './checkpoints.mjs';
-import { buildReportDigest, DIGEST_VERSION } from './digest.mjs';
+import { buildReportDigest, serializeDigest, DIGEST_VERSION } from './digest.mjs';
 import { testPostgresConnection, postgresHint, listLiveSources } from './sources.mjs';
 import { log, startLogFile, currentLogFile, addSecretsFromEnv, redact, formatDuration } from './log.mjs';
 import { checkBackend, loadBackend, closeBackend, classifyBackendIssue, issueText, BACKEND_CONTRACT, QUERY_ROW_LIMIT } from './backend-check.mjs';
@@ -734,7 +734,18 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
   const env = loadLocalEnv();
   addSecretsFromEnv(env);
   addSecretsFromEnv(process.env);
-  const discovered = discover();
+  log.info('scan', `Reading the PBIP project in ${rel(inputDir)}...`);
+  const discovered = discover({ checkFiles: false });
+  // File and folder sources are checked in parallel with a time limit, so an unreachable network share cannot freeze this window.
+  if (discovered.fileSources.length) {
+    log.info('scan', `Checking ${discovered.fileSources.length} file/folder source(s) the model reads (up to 15 s each)...`);
+    await checkSourceAvailability(discovered, {
+      timeoutMs: 15_000,
+      onProgress: ({ done, total, source, ms }) => source.available
+        ? log.detail('scan', `[${done}/${total}] ${source.path}: readable${source.bytes !== null ? ` (${formatBytes(source.bytes)})` : ''} in ${ms} ms`)
+        : log.warn('scan', `[${done}/${total}] ${source.path}: NOT readable (${source.error === 'TIMEOUT' ? 'no answer within 15 s: VPN or network share?' : source.error})`)
+    });
+  }
   const scope = createRunScope(pageLimit);
   const selected = selectPages(discovered.pages, pageLimit);
   const inventory = { ...discovered, pages: selected, pageScope: { mode: scope.key, selectedPages: selected.length, totalPages: discovered.pages.length, selectedPageIds: selected.map(page => page.id) } };
@@ -750,7 +761,8 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
   const previousInventory = readJson(path.join(scope.workDir, 'inventory.json'));
   writeJson(path.join(scope.workDir, 'inventory.json'), inventory);
   const digest = buildReportDigest(inventory);
-  writeJson(path.join(scope.workDir, 'report-digest.json'), digest);
+  // Long M/DAX/SQL text is written as arrays of short lines: Gemini CLI's read_file cuts lines after 2000 characters.
+  fs.writeFileSync(path.join(scope.workDir, 'report-digest.json'), serializeDigest(digest));
   log.info('digest', `${rel(path.join(scope.workDir, 'report-digest.json'))}: ${digest.counts.includedTables} of ${digest.counts.modelTables} model table(s), ${digest.counts.includedMeasures} measure(s), ${digest.counts.relationships} relationship(s) in scope (${formatBytes(fs.statSync(path.join(scope.workDir, 'report-digest.json')).size)}).`);
   for (const warning of digest.warnings) log.warn('digest', warning);
   if (preflightOnly) {

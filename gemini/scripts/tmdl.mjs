@@ -34,18 +34,29 @@ export function parseTmdlName(text) {
   return match ? { name: match[1], rest: match[2] } : { name: '', rest: source };
 }
 
+// Table.Column, 'Table Name'.Column, Table.'Column Name', 'T'.'Col''s', or a
+// bare column. TMDL quotes any name containing a dot, space, quote, = or :, so
+// the first dot outside quotes separates the table from the column.
 export function parseQualifiedColumn(text) {
-  const first = parseTmdlName(text ?? '');
-  const rest = first.rest.trimStart();
-  if (rest.startsWith('.')) return { table: first.name, column: parseTmdlName(rest.slice(1)).name };
-  // Unquoted Table.Column is a single token.
-  const dot = first.name.indexOf('.');
-  if (dot > 0) return { table: first.name.slice(0, dot), column: first.name.slice(dot + 1) };
-  return { table: null, column: first.name };
+  const source = String(text ?? '').trim();
+  if (source.startsWith("'")) {
+    const first = parseTmdlName(source);
+    const rest = first.rest.trimStart();
+    if (rest.startsWith('.')) return { table: first.name, column: parseTmdlName(rest.slice(1)).name };
+    return { table: null, column: first.name };
+  }
+  const unquoted = /^([^\s.'=:]+)\s*\.\s*([\s\S]*)$/.exec(source);
+  if (unquoted) return { table: unquoted[1], column: parseTmdlName(unquoted[2]).name };
+  return { table: null, column: parseTmdlName(source).name };
+}
+
+// An object reference property such as sortByColumn: 'Month Number' or a hierarchy level's column.
+export function tmdlReferenceName(text) {
+  return text == null ? text : parseTmdlName(String(text)).name;
 }
 
 export function parseTmdl(text) {
-  const lines = String(text ?? '').replace(/^﻿/, '').split(/\r?\n/);
+  const lines = String(text ?? '').replace(/^\uFEFF/, '').split(/\r?\n/);
   let cursor = 0;
 
   function dedent(block) {

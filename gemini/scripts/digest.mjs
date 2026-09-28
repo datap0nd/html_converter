@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { root as defaultRoot, inputDir as defaultInputDir, walk, relative, readJson } from './core.mjs';
-import { literalText, describeField, visualTitle, visualProjections, classifyVisual, visualType, formattingFields } from './pbir.mjs';
-import { parseTmdl, parseTmdlName, parseQualifiedColumn } from './tmdl.mjs';
+import { root as defaultRoot, inputDir as defaultInputDir, walk, relative, readJson, decodeEnterData } from './core.mjs';
+import { literalText, describeField, visualTitle, visualTitleShow, visualProjections, classifyVisual, visualType, formattingFields, pageType } from './pbir.mjs';
+import { parseTmdl, parseTmdlName, parseQualifiedColumn, tmdlReferenceName } from './tmdl.mjs';
 
 export { parseTmdl, parseTmdlName, parseQualifiedColumn };
 
@@ -12,7 +12,10 @@ export { literalText, describeField, visualTitle, visualProjections, classifyVis
 // so Gemini can start from one file instead of crawling every PBIR/TMDL file
 // with a tool call each. Nothing here executes M or DAX.
 
-export const DIGEST_VERSION = 1;
+export const DIGEST_VERSION = 2;
+
+// Enter Data rows copied into the digest per table.
+const MAX_ENTER_DATA_ROWS = 5000;
 
 const MAX_RAW = 4000;
 
@@ -51,12 +54,14 @@ export function visualDigest(json, meta = {}) {
   const visual = json?.visual ?? {};
   const role = classifyVisual(json);
   const slicerSelection = visual.objects?.general?.[0]?.properties?.filter?.filter;
+  const titleShow = visualTitleShow(json);
   return {
     id: meta.id ?? json?.name ?? null,
     source: meta.source ?? null,
     type: visualType(json),
     role,
     title: visualTitle(json),
+    ...(titleShow !== null ? { titleShow } : {}),
     position: json?.position ?? null,
     ...(json?.parentGroupName ? { parentGroup: json.parentGroupName } : {}),
     ...(json?.isHidden ? { hidden: true } : {}),
@@ -100,16 +105,17 @@ function tmdlTable(node, file) {
         ...(child.props.sourceColumn ? { sourceColumn: literalQuoted(child.props.sourceColumn) } : {}),
         ...(child.props.formatString ? { formatString: child.props.formatString } : {}),
         ...(child.props.summarizeBy ? { summarizeBy: child.props.summarizeBy } : {}),
-        ...(child.props.sortByColumn ? { sortByColumn: child.props.sortByColumn } : {}),
+        ...(child.props.sortByColumn ? { sortByColumn: tmdlReferenceName(child.props.sortByColumn) } : {}),
         ...(child.props.isHidden ? { hidden: true } : {}),
-        ...(child.props.isKey ? { key: true } : {})
+        ...(child.props.isKey ? { key: true } : {}),
+        ...(child.description ? { description: child.description } : {})
       });
     } else if (child.kind === 'measure') {
       table.measures.push(tmdlMeasure(child));
     } else if (child.kind === 'partition') {
       table.partitions.push({ name: child.name, type: (child.value ?? '').trim() || null, mode: child.props.mode ?? null, source: child.props.source ?? child.props.expression ?? child.props.query ?? null, ...(child.props.expressionSource ? { expressionSource: child.props.expressionSource } : {}) });
     } else if (child.kind === 'hierarchy') {
-      table.hierarchies.push({ name: child.name, levels: child.children.filter(x => x.kind === 'level').map(level => ({ name: level.name, column: level.props.column ?? null })) });
+      table.hierarchies.push({ name: child.name, levels: child.children.filter(x => x.kind === 'level').map(level => ({ name: level.name, column: tmdlReferenceName(level.props.column) ?? null })) });
     } else if (child.kind === 'calculationGroup') {
       table.calculationGroup = { precedence: child.props.precedence ? Number(child.props.precedence) : null, items: child.children.filter(x => x.kind === 'calculationItem').map(item => ({ name: item.name, expression: item.value ?? '', ...(item.props.ordinal ? { ordinal: Number(item.props.ordinal) } : {}), ...(item.children.find(x => x.kind === 'formatStringDefinition')?.value ? { formatStringExpression: item.children.find(x => x.kind === 'formatStringDefinition').value } : {}) })) };
     }
@@ -152,7 +158,13 @@ function bimModel(json, file) {
   }));
   const relationships = (model.relationships ?? []).map(item => ({ name: item.name, source: file, fromTable: item.fromTable, fromColumn: item.fromColumn, toTable: item.toTable, toColumn: item.toColumn, crossFilteringBehavior: item.crossFilteringBehavior ?? 'oneDirection', active: item.isActive !== false }));
   const expressions = (model.expressions ?? []).map(item => ({ name: item.name, kind: item.kind ?? 'm', expression: bimText(item.expression) ?? '', source: file }));
-  return { tables, relationships, expressions };
+  const functions = (model.functions ?? []).map(item => ({ name: item.name, expression: bimText(item.expression) ?? '', ...(item.description ? { description: bimText(item.description) } : {}), source: file }));
+  return { tables, relationships, expressions, functions };
+}
+
+// A DAX user-defined function (TMDL: function 'Lib.Name' = (x : expr) => ...).
+function tmdlFunction(node, file) {
+  return { name: node.name, expression: node.value ?? '', ...(node.description ? { description: node.description } : {}), source: file };
 }
 
 export function isModelDefinitionFile(file) {
@@ -162,7 +174,7 @@ export function isModelDefinitionFile(file) {
 }
 
 export function loadSemanticModel(files, rootDir = defaultRoot) {
-  const model = { format: null, tables: [], relationships: [], expressions: [], parseErrors: [], ignored: [] };
+  const model = { format: null, tables: [], relationships: [], expressions: [], functions: [], parseErrors: [], ignored: [] };
   const rel = file => path.relative(rootDir, file).replaceAll('\\', '/');
   const definitions = files.filter(isModelDefinitionFile);
   // A TMDL definition folder is authoritative; a leftover model.bim beside it would duplicate every table.
@@ -178,6 +190,7 @@ export function loadSemanticModel(files, rootDir = defaultRoot) {
         model.tables.push(...part.tables);
         model.relationships.push(...part.relationships);
         model.expressions.push(...part.expressions);
+        model.functions.push(...part.functions);
         continue;
       }
       model.format ??= 'tmdl';
@@ -186,11 +199,14 @@ export function loadSemanticModel(files, rootDir = defaultRoot) {
         if (node.kind === 'table' || node.kind === 'calculationGroup') model.tables.push(tmdlTable(node, rel(file)));
         else if (node.kind === 'relationship') model.relationships.push(tmdlRelationship(node, rel(file)));
         else if (node.kind === 'expression') model.expressions.push({ name: node.name, kind: 'm', expression: node.value ?? '', ...(node.props.queryGroup ? { queryGroup: node.props.queryGroup } : {}), source: rel(file) });
+        else if (node.kind === 'function') model.functions.push(tmdlFunction(node, rel(file)));
         else if (node.kind === 'model') {
           for (const child of node.children) {
+            if (child.ref) continue;
             if (child.kind === 'table') model.tables.push(tmdlTable(child, rel(file)));
             else if (child.kind === 'relationship') model.relationships.push(tmdlRelationship(child, rel(file)));
             else if (child.kind === 'expression') model.expressions.push({ name: child.name, kind: 'm', expression: child.value ?? '', source: rel(file) });
+            else if (child.kind === 'function') model.functions.push(tmdlFunction(child, rel(file)));
           }
         }
       }
@@ -313,11 +329,19 @@ export function scopeModel(model, seeds) {
     return true;
   };
   const addExpression = name => { const item = model.expressions.find(x => x.name === name); if (item && !expressions.has(item.name)) { expressions.add(item.name); queue.push({ type: 'expression', item }); } };
+  // DAX user-defined functions called by scoped DAX: their bodies can reference more tables and measures.
+  const functionsByName = new Map((model.functions ?? []).map(item => [String(item.name).toLowerCase(), item]));
+  const followedFunctions = new Set();
   const scanDax = text => {
     const refs = daxReferences(text, tableNames);
     for (const ref of refs.qualified) if (!addMeasure(ref.table, ref.name)) addTable(ref.table);
     for (const name of refs.unqualified) addMeasure(null, name);
     refs.tables.forEach(addTable);
+    if (!functionsByName.size) return;
+    for (const call of stripDax(text).matchAll(/([A-Za-z_][A-Za-z0-9_.]*)\s*\(/g)) {
+      const called = functionsByName.get(call[1].toLowerCase());
+      if (called && !followedFunctions.has(called.name)) { followedFunctions.add(called.name); scanDax(called.expression); }
+    }
   };
   const scanM = text => {
     for (const name of mReferences(text, [...tableNames, ...expressionNames])) {
@@ -392,13 +416,17 @@ export function buildReportDigest(inventory, { rootDir = defaultRoot, inputDir =
       if (!json) { warnings.push(`Could not parse ${meta.source}; open it directly.`); return { id: meta.id, source: meta.source, type: meta.type, role: meta.role ?? 'data', unreadable: true }; }
       return visualDigest(json, meta);
     });
+    const type = page.pageType !== undefined ? page.pageType : pageType(pageJson);
     return {
       id: page.id, name: page.name, source: page.source,
+      ...(type ? { pageType: type } : {}),
       width: pageJson.width ?? null, height: pageJson.height ?? null,
       displayOption: pageJson.displayOption ?? null,
       ...(pageJson.visibility ? { visibility: pageJson.visibility } : {}),
       ...(pageJson.pageBinding ? { pageBinding: compact(pageJson.pageBinding, 1500) } : {}),
       filters: filterDigest(pageJson.filterConfig?.filters),
+      // Edit interactions: how a source visual filters (DataFilter), highlights (HighlightFilter), or leaves alone (NoFilter) a target visual.
+      ...(Array.isArray(pageJson.visualInteractions) && pageJson.visualInteractions.length ? { interactions: pageJson.visualInteractions.map(item => ({ source: item?.source ?? null, target: item?.target ?? null, type: item?.type ?? null })) } : {}),
       visuals
     };
   });
@@ -406,7 +434,9 @@ export function buildReportDigest(inventory, { rootDir = defaultRoot, inputDir =
   const extensions = findReportExtensions(inventory, rootDir);
   const reportFilters = filterDigest(report?.json?.filterConfig?.filters);
   const seeds = fieldsOf([pages, reportFilters], []);
-  const files = walk(inputDir);
+  // Only the project's own semantic model (inventory.semanticModelFolder from discover);
+  // older inventories without the field scan all of input/.
+  const files = inventory.semanticModelFolder ? walk(path.join(rootDir, inventory.semanticModelFolder)) : inventory.semanticModelFolder === null ? [] : walk(inputDir);
   const model = loadSemanticModel(files, rootDir);
   if (!model.format) warnings.push('No TMDL or model.bim semantic model definition found under input/.');
   if (model.ignored.length) warnings.push(`Ignored ${model.ignored.join(', ')} because the TMDL definition folder is authoritative.`);
@@ -421,11 +451,24 @@ export function buildReportDigest(inventory, { rootDir = defaultRoot, inputDir =
   const knownTables = new Set(model.tables.map(table => table.name.toLowerCase()));
   const unresolved = [...new Set(seeds.filter(field => field.table && !knownTables.has(field.table.toLowerCase())).map(field => field.table))];
   if (unresolved.length && model.format) warnings.push(`Visual fields reference tables not found in the model definition: ${unresolved.join(', ')}.`);
+  // "Enter Data" tables: rows decoded here, base64 replaced by a pointer so no huge line reaches the reader.
+  const enterData = {};
+  const withEnterData = (name, text) => {
+    if (typeof text !== 'string' || !/Binary\.FromText\s*\(/.test(text)) return text;
+    const decoded = decodeEnterData(text);
+    if (!decoded) return text;
+    enterData[name] = { columns: decoded.columns, rowCount: decoded.rows.length, rows: decoded.rows.slice(0, MAX_ENTER_DATA_ROWS), truncated: decoded.rows.length > MAX_ENTER_DATA_ROWS };
+    const placeholder = `<base64 omitted: decoded rows are in digest.enterData['${String(name).replaceAll("'", "\\'")}']>`.replaceAll('"', '""');
+    return text.replace(/(Binary\.FromText\s*\(\s*)"[^"]*"/, (_all, prefix) => `${prefix}"${placeholder}"`);
+  };
+  const scopedTables = scoped.tables.map(table => ({ ...table, partitions: table.partitions.map(partition => partition.type === 'calculated' ? partition : { ...partition, source: withEnterData(table.name, partition.source) }) }));
+  const scopedExpressions = scoped.expressions.map(item => ({ ...item, expression: withEnterData(item.name, item.expression) }));
   const visualCount = pages.reduce((sum, page) => sum + page.visuals.length, 0);
   return {
     digestVersion: DIGEST_VERSION,
     purpose: 'Deterministic extraction of the selected report scope. Start here; open the cited source files only for details not captured (formatting objects, full filter JSON).',
     project: inventory.project,
+    ...(inventory.semanticModelFolder !== undefined ? { semanticModelFolder: inventory.semanticModelFolder } : {}),
     scope: inventory.pageScope ?? null,
     counts: {
       pages: pages.length,
@@ -434,19 +477,24 @@ export function buildReportDigest(inventory, { rootDir = defaultRoot, inputDir =
       decorativeVisuals: pages.reduce((sum, page) => sum + page.visuals.filter(v => v.role === 'decorative').length, 0),
       groups: pages.reduce((sum, page) => sum + page.visuals.filter(v => v.role === 'group').length, 0),
       modelTables: model.tables.length,
-      includedTables: scoped.tables.length,
-      includedMeasures: scoped.tables.reduce((sum, table) => sum + table.measures.length, 0),
-      relationships: scoped.relationships.length
+      includedTables: scopedTables.length,
+      includedMeasures: scopedTables.reduce((sum, table) => sum + table.measures.length, 0),
+      relationships: scoped.relationships.length,
+      functions: model.functions.length,
+      enterDataTables: Object.keys(enterData).length
     },
     reportFilters,
     ...(report ? { reportDefinition: relative(report.file) } : {}),
     pages,
-    model: { format: model.format, ...scoped },
+    // functions: every DAX user-defined function of the model (they are small).
+    model: { format: model.format, ...scoped, tables: scopedTables, expressions: scopedExpressions, functions: model.functions },
+    ...(Object.keys(enterData).length ? { enterData } : {}),
     sources: {
       postgres: inventory.postgresSources ?? [],
       directCsv: (inventory.directCsvSources ?? []).map(({ path: file, referencedBy, available, error }) => ({ path: file, referencedBy, available, ...(error ? { error } : {}) })),
-      // Every File.Contents target; csvOptions mirror Csv.Document (read with helpers.core.readCsvFile).
-      files: (inventory.fileSources ?? []).map(({ path: file, referencedBy, reader, available, error, csvOptions }) => ({ path: file, referencedBy, reader, available, ...(error ? { error } : {}), ...(csvOptions ? { csvOptions } : {}) })),
+      // Every File.Contents / Folder.Files / Folder.Contents target; csvOptions mirror Csv.Document (read with helpers.core.readCsvFile).
+      files: (inventory.fileSources ?? []).map(({ path: file, referencedBy, query, kind, reader, available, error, csvOptions }) => ({ path: file, referencedBy, ...(query != null ? { query } : {}), ...(kind ? { kind } : {}), reader, available, ...(error ? { error } : {}), ...(csvOptions ? { csvOptions } : {}) })),
+      web: inventory.webSources ?? [],
       mParameters: inventory.mParameters ?? {},
       unresolved: inventory.unresolvedSources ?? [],
       otherConnectors: inventory.unsupportedConnectors ?? []
@@ -454,3 +502,140 @@ export function buildReportDigest(inventory, { rootDir = defaultRoot, inputDir =
     warnings
   };
 }
+
+// ---------- digest file for Gemini CLI's read_file ----------
+//
+// read_file shows at most 2000 lines per call and cuts every line after 2000
+// characters, so a pretty-printed digest with one-line M/DAX strings loses the
+// end of long expressions. serializeDigest writes the same data with every long
+// or multi-line string as an array of lines, no line over MAX_LINE characters,
+// small objects on one line, and a readingNote that explains both conventions.
+
+const MAX_LINE = 1000;
+const PIECE = 700;          // JSON-escaped characters in one piece of a long line
+const WRAP = 800;           // compact JSON is broken after a comma past this width
+const INLINE = 160;         // objects/arrays that fit this width stay on one line
+// Values printed as compact JSON wrapped over lines rather than one key per line.
+const COMPACT_KEYS = new Set(['condition', 'savedSlicerSelection', 'slicerMode', 'pageBinding', 'raw', 'interactions', 'rows']);
+
+class TextLines {
+  constructor(items) { this.items = items; }
+  toJSON() { return this.items; }
+}
+
+function escapedWidth(char) {
+  const code = char.codePointAt(0);
+  if (char === '"' || char === '\\' || char === '\n' || char === '\r' || char === '\t' || char === '\b' || char === '\f') return 2;
+  if (code < 0x20 || (code >= 0xd800 && code <= 0xdfff)) return 6;
+  return 1;
+}
+
+function escapedLength(text) {
+  let size = 0;
+  for (const char of text) size += escapedWidth(char);
+  return size;
+}
+
+// One line of text: itself, or an array of pieces of at most PIECE escaped characters.
+function splitLine(line) {
+  if (escapedLength(line) <= PIECE) return line;
+  const pieces = [];
+  let current = '', size = 0;
+  for (const char of line) {
+    const width = escapedWidth(char);
+    if (size + width > PIECE && current) {
+      // Prefer to break after a space or comma near the end of the piece.
+      const cut = Math.max(current.lastIndexOf(' '), current.lastIndexOf(','));
+      if (cut >= current.length * 0.8) { pieces.push(current.slice(0, cut + 1)); current = current.slice(cut + 1); size = escapedLength(current); }
+      else { pieces.push(current); current = ''; size = 0; }
+    }
+    current += char;
+    size += width;
+  }
+  if (current) pieces.push(current);
+  return pieces;
+}
+
+function prepare(value) {
+  if (typeof value === 'string') return value.includes('\n') || escapedLength(value) > PIECE ? new TextLines(value.split(/\r?\n/).map(splitLine)) : value;
+  if (Array.isArray(value)) return value.map(item => item === undefined || typeof item === 'function' ? null : prepare(item));
+  if (value && typeof value === 'object') {
+    if (typeof value.toJSON === 'function') return prepare(value.toJSON());
+    const result = {};
+    for (const [key, item] of Object.entries(value)) if (item !== undefined && typeof item !== 'function') result[key] = prepare(item);
+    return result;
+  }
+  return value;
+}
+
+function containsTextLines(value) {
+  if (value instanceof TextLines) return true;
+  if (!value || typeof value !== 'object') return false;
+  return Object.values(value).some(containsTextLines);
+}
+
+function wrapCompact(json, pad, head, tail, out) {
+  if (head.length + json.length + tail.length <= WRAP) { out.push(head + json + tail); return; }
+  const segments = [];
+  let start = 0, quoted = false;
+  for (let index = 0; index < json.length; index++) {
+    const c = json[index];
+    if (quoted) { if (c === '\\') index++; else if (c === '"') quoted = false; continue; }
+    if (c === '"') quoted = true;
+    else if (c === ',') { segments.push(json.slice(start, index + 1)); start = index + 1; }
+  }
+  segments.push(json.slice(start) + tail);
+  let line = head, fresh = true;
+  for (const segment of segments) {
+    if (!fresh && line.length + segment.length > WRAP) { out.push(line); line = `${pad}  `; }
+    line += segment;
+    fresh = false;
+  }
+  out.push(line);
+}
+
+function render(value, pad, head, tail, compactValue, out) {
+  if (value === null || typeof value !== 'object') { out.push(head + JSON.stringify(value) + tail); return; }
+  const lines = value instanceof TextLines;
+  const json = JSON.stringify(value);
+  if (compactValue && !lines) { wrapCompact(json, pad, head, tail, out); return; }
+  if (!lines && head.length + json.length + tail.length <= INLINE && !containsTextLines(value)) { out.push(head + json + tail); return; }
+  const isArray = lines || Array.isArray(value);
+  const entries = lines ? value.items.map(item => [null, item]) : isArray ? value.map(item => [null, item]) : Object.entries(value);
+  if (!entries.length) { out.push(head + (isArray ? '[]' : '{}') + tail); return; }
+  out.push(head + (isArray ? '[' : '{'));
+  const inner = `${pad}  `;
+  entries.forEach(([key, item], index) => {
+    const childHead = inner + (key === null ? '' : `${JSON.stringify(key)}: `);
+    const childTail = index < entries.length - 1 ? ',' : '';
+    if (lines && Array.isArray(item)) {
+      // One long source line split into pieces, one piece per output line.
+      out.push(`${childHead}[`);
+      item.forEach((piece, pieceIndex) => out.push(`${inner}  ${JSON.stringify(piece)}${pieceIndex < item.length - 1 ? ',' : ''}`));
+      out.push(`${inner}]${childTail}`);
+    } else render(item, inner, childHead, childTail, key !== null && COMPACT_KEYS.has(key), out);
+  });
+  out.push(pad + (isArray ? ']' : '}') + tail);
+}
+
+function readingNote(lineCount) {
+  return `This file has ${lineCount} lines and read_file shows at most 2000 lines per call: keep calling read_file with start_line (offset in older Gemini CLI versions) 2001, 4001, ... until you have read line ${lineCount}. Long or multi-line text (M, DAX, SQL, descriptions) is an array of lines: join the elements with a newline. An element that is itself an array is one long line split into pieces: join those pieces with nothing in between. Long JSON values (filter conditions, slicer selections, Enter Data rows) are compact JSON wrapped over several lines.`;
+}
+
+// JSON text of a digest for work/report-digest.json. JSON.parse of it gives the
+// digest with long strings as arrays of lines (see digestText to join them back).
+export function serializeDigest(digest) {
+  const body = prepare(digest);
+  const text = count => { const out = []; render({ readingNote: readingNote(count), ...body }, '', '', '', false, out); return out; };
+  const count = text(0).length;
+  return `${text(count).join('\n')}\n`;
+}
+
+// Joins a value read back from a serialized digest (string, or array of lines
+// whose elements may be arrays of pieces) into the original text.
+export function digestText(value) {
+  if (!Array.isArray(value)) return value;
+  return value.map(line => Array.isArray(line) ? line.join('') : String(line ?? '')).join('\n');
+}
+
+export const DIGEST_LIMITS = Object.freeze({ maxLine: MAX_LINE, readFileLines: 2000 });

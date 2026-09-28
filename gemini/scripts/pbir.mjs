@@ -16,6 +16,26 @@ function sourceEntity(expression, aliases) {
   return null;
 }
 
+// Model fields nested anywhere inside a query expression (SparklineData,
+// Arithmetic, Min/Max/Percentile, ScopedEval, filtered aggregations, ...), so
+// model scoping sees every table and measure such an expression needs.
+export function nestedModelFields(value, aliases = {}, into = [], seen = new Set()) {
+  if (!value || typeof value !== 'object') return into;
+  if (Array.isArray(value)) { value.forEach(item => nestedModelFields(item, aliases, into, seen)); return into; }
+  if (Array.isArray(value.From)) aliases = { ...aliases, ...Object.fromEntries(value.From.filter(item => item?.Name && item?.Entity).map(item => [item.Name, item.Entity])) };
+  for (const key of ['Column', 'Measure', 'HierarchyLevel', 'Hierarchy']) {
+    const inner = value[key];
+    if (inner && typeof inner === 'object' && (inner.Expression || inner.Property || inner.Level)) {
+      const field = describeField({ [key]: inner }, aliases);
+      const id = `${field?.kind}|${field?.table}|${field?.name ?? field?.hierarchy}|${field?.level ?? ''}`;
+      if (field && (field.table || field.name) && !seen.has(id)) { seen.add(id); into.push(field); }
+      return into;
+    }
+  }
+  for (const item of Object.values(value)) nestedModelFields(item, aliases, into, seen);
+  return into;
+}
+
 export function describeField(field, aliases = {}) {
   if (!field || typeof field !== 'object') return null;
   if (field.Column) return { kind: 'column', table: sourceEntity(field.Column.Expression, aliases), name: field.Column.Property };
@@ -32,8 +52,20 @@ export function describeField(field, aliases = {}) {
     return { kind: 'hierarchyLevel', table, hierarchy: hierarchy?.Hierarchy ?? null, level: field.HierarchyLevel.Level ?? null, ...(variation?.Property ? { name: variation.Property, autoDateHierarchy: true } : {}) };
   }
   if (field.Hierarchy) return { kind: 'hierarchy', table: sourceEntity(field.Hierarchy.Expression, aliases), hierarchy: field.Hierarchy.Hierarchy ?? null };
+  if (field.NativeVisualCalculation && typeof field.NativeVisualCalculation === 'object') {
+    // A visual calculation: DAX over the visual's own columns (their nativeQueryRef names), not model objects.
+    const calc = field.NativeVisualCalculation;
+    return { kind: 'visualCalculation', name: calc.Name ?? null, expression: calc.Expression ?? null, ...(calc.Language ? { language: calc.Language } : {}) };
+  }
   const text = JSON.stringify(field);
-  return { kind: 'expression', raw: text.length > 1200 ? `${text.slice(0, 1200)}... [truncated; see source file]` : field };
+  const fields = nestedModelFields(field, aliases);
+  const keys = Object.keys(field);
+  return {
+    kind: 'expression',
+    ...(keys.length === 1 ? { expressionKind: keys[0] } : {}),
+    raw: text.length > 1200 ? `${text.slice(0, 1200)}... [truncated; see source file]` : field,
+    ...(fields.length ? { fields } : {})
+  };
 }
 
 export function visualTitle(json) {
@@ -45,6 +77,24 @@ export function visualTitle(json) {
   return json?.visualGroup?.displayName ?? null;
 }
 
+// The title's explicit show flag (true/false), or null when the visual keeps the default.
+export function visualTitleShow(json) {
+  const visual = json?.visual ?? {};
+  for (const entry of [visual.visualContainerObjects?.title, visual.objects?.title]) {
+    const value = entry?.[0]?.properties?.show?.expr?.Literal?.Value;
+    if (value === true || value === 'true') return true;
+    if (value === false || value === 'false') return false;
+  }
+  return null;
+}
+
+// Small JSON values stay as they are; anything bigger is cut with a marker.
+function smallValue(value, limit = 600) {
+  const text = JSON.stringify(value);
+  if (text === undefined) return undefined;
+  return text.length > limit ? `${text.slice(0, limit)}... [truncated ${text.length - limit} chars; see source file]` : value;
+}
+
 export function visualProjections(json) {
   const state = json?.visual?.query?.queryState;
   if (!state || typeof state !== 'object') return {};
@@ -52,12 +102,17 @@ export function visualProjections(json) {
   for (const [role, bucket] of Object.entries(state)) {
     const projections = Array.isArray(bucket?.projections) ? bucket.projections : [];
     if (!projections.length) continue;
-    roles[role] = projections.map(projection => ({
-      ...describeField(projection?.field),
-      queryRef: projection?.queryRef ?? null,
-      ...(projection?.displayName ? { displayName: projection.displayName } : {}),
-      ...(projection?.active === false ? { active: false } : {})
-    }));
+    // Every projection property except the field itself: nativeQueryRef (the
+    // name visual calculations use), displayName, active, hidden, format, ...
+    roles[role] = projections.map(projection => {
+      const { field, queryRef, ...rest } = projection && typeof projection === 'object' ? projection : {};
+      const result = { ...describeField(field), queryRef: queryRef ?? null };
+      for (const [key, value] of Object.entries(rest)) {
+        const small = smallValue(value);
+        if (small !== undefined && !(key in result)) result[key] = small;
+      }
+      return result;
+    });
   }
   return roles;
 }
@@ -101,4 +156,10 @@ export function visualType(json) {
 
 export function pageIsHidden(json) {
   return json?.visibility === 'HiddenInViewMode';
+}
+
+// 'Tooltip', 'Drillthrough', ... from page.json type or pageBinding.type; null for a normal page.
+export function pageType(json) {
+  const type = json?.type ?? json?.pageBinding?.type ?? null;
+  return typeof type === 'string' && type && type !== 'Default' ? type : null;
 }
