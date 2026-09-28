@@ -204,7 +204,8 @@ function splitServer(server) {
 // The one PostgreSQL configuration shared by preflight, the snapshot flow and the
 // generated backend (through helpers.postgres): PG_HOST/PG_PORT/PG_DATABASE
 // override the PBIP server ("host", "host:port" or "[v6]:port") and database,
-// PG_SSL_MODE is verify-full (default) or disable, PG_SSL_CA_FILE is read here,
+// PG_SSL_MODE is verify-full (default: TLS with a verified certificate), require (TLS,
+// certificate not checked) or disable (no TLS, for servers without it), PG_SSL_CA_FILE is read here,
 // and every session is read-only with a 60 s statement timeout.
 export function postgresConfig(connection, env = {}) {
   if (!env.PG_USER || !env.PG_PASSWORD) throw new Error('PostgreSQL source found. Fill PG_USER and PG_PASSWORD in gemini/.env with a read-only login.');
@@ -214,9 +215,9 @@ export function postgresConfig(connection, env = {}) {
   if (!host || !Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PostgreSQL host/port. Check PBIP and gemini/.env.');
   const database = env.PG_DATABASE || connection?.database;
   if (!database) throw new Error('PostgreSQL database name is missing. Check the PBIP source or set PG_DATABASE in gemini/.env.');
-  const mode = env.PG_SSL_MODE || 'verify-full';
-  if (!['verify-full', 'disable'].includes(mode)) throw new Error('PG_SSL_MODE must be verify-full or disable.');
-  const ssl = mode === 'disable' ? false : { rejectUnauthorized: true };
+  const mode = String(env.PG_SSL_MODE || 'verify-full').trim().toLowerCase();
+  if (!['verify-full', 'require', 'disable'].includes(mode)) throw new Error(`PG_SSL_MODE in gemini/.env is "${env.PG_SSL_MODE}"; it must be verify-full, require or disable.`);
+  const ssl = mode === 'disable' ? false : { rejectUnauthorized: mode === 'verify-full' };
   if (ssl && env.PG_SSL_CA_FILE) {
     try { ssl.ca = fs.readFileSync(env.PG_SSL_CA_FILE, 'utf8'); }
     catch (error) {
@@ -289,8 +290,10 @@ export function postgresHint(error) {
   if (/PG_USER|PG_PASSWORD/.test(text)) return 'Fill PG_USER and PG_PASSWORD in gemini/.env with a read-only login.';
   if (/28P01|password authentication failed/i.test(text)) return 'The database rejected PG_USER/PG_PASSWORD. Check them in gemini/.env (no quotes needed).';
   if (/unsupported startup parameter/i.test(text)) return 'A connection pooler (PgBouncer) rejected the read-only session settings. Point PG_HOST/PG_PORT at the PostgreSQL server itself, or ask the DBA to add options and statement_timeout to PgBouncer ignore_startup_parameters.';
-  if (/self[- ]signed|unable to (?:get|verify) (?:local )?issuer|unable to verify the first certificate|UNABLE_TO_VERIFY_LEAF_SIGNATURE|SELF_SIGNED_CERT|CERT_|certificate/i.test(text)) return 'TLS certificate not trusted. Set PG_SSL_CA_FILE in gemini/.env to your organization root CA (.pem/.crt). Use PG_SSL_MODE=disable only if your DBA approves unencrypted connections.';
-  if (/does not support SSL|server does not support SSL/i.test(text)) return 'The server does not accept TLS. Set PG_SSL_MODE=disable in gemini/.env only if your DBA approves this.';
+  if (/PG_SSL_MODE in gemini/.test(text)) return 'Open gemini\\.env (next to setup.ps1) and set the PG_SSL_MODE line to verify-full, require or disable.';
+  if (/does not support SSL|server does not support SSL/i.test(text)) return 'This PostgreSQL server does not offer encrypted connections at all, so Power BI also connects to it unencrypted. To connect the same way: open gemini\\.env (next to setup.ps1), change the line PG_SSL_MODE=verify-full to PG_SSL_MODE=disable, save it, and rerun .\\setup.ps1. (If your DBA enables TLS on the server later, switch back to verify-full.)';
+  if (/self[- ]signed|unable to (?:get|verify) (?:local )?issuer|unable to verify the first certificate|UNABLE_TO_VERIFY_LEAF_SIGNATURE|SELF_SIGNED_CERT|CERT_|certificate/i.test(text)) return 'The PostgreSQL server\'s TLS certificate is not trusted by this PC. Best: add PG_SSL_CA_FILE=<full path of your organization root CA .pem/.crt> to gemini\\.env. Or set PG_SSL_MODE=require there: still encrypted, but the certificate is not checked. Use PG_SSL_MODE=disable only if your DBA approves unencrypted connections.';
+  if (/no pg_hba\.conf entry.*no encryption/i.test(text)) return 'The server only accepts encrypted connections from this PC. Set PG_SSL_MODE=verify-full (or require) in gemini\\.env instead of disable.';
   if (/no pg_hba\.conf entry/i.test(text)) return 'The server refused this PC/user (pg_hba.conf). Ask the DBA to allow your login, or check PG_SSL_MODE.';
   if (/53300|too many (?:connections|clients)|remaining connection slots/i.test(text)) return 'The database refused another connection for this login (connection limit reached). Close other tools that use this login, or ask the DBA to raise its connection limit; the report opens at most 4 connections.';
   if (/57014|statement timeout|Query read timeout/i.test(text)) return 'A query ran longer than 60 seconds. The database may be busy or the query too heavy for it; retry later, or ask the DBA about indexes on the filtered columns.';
@@ -315,7 +318,7 @@ export async function testPostgresConnection(source, env = {}, options = {}) {
     await client.query('BEGIN READ ONLY');
     await client.query('SELECT 1');
     await client.query('COMMIT');
-    return { host: config.host, port: config.port, database: config.database, user: config.user, ms: Date.now() - started };
+    return { host: config.host, port: config.port, database: config.database, user: config.user, ms: Date.now() - started, ssl: config.ssl ? (config.ssl.rejectUnauthorized ? 'TLS, certificate verified' : 'TLS, certificate not checked') : 'unencrypted (PG_SSL_MODE=disable)' };
   } catch (error) {
     const wrapped = new Error(`${config.host}:${config.port}/${config.database} as ${config.user}: ${error.message}`);
     wrapped.code = error.code;

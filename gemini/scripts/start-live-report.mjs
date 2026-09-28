@@ -33,10 +33,12 @@ const canonicalPhaseArtifacts = {
 };
 
 export class ConversionError extends Error {
-  constructor(message, { hint = null, phase = null } = {}) {
+  // problems: [{ message, hint }] when several independent things must be fixed.
+  constructor(message, { hint = null, phase = null, problems = null } = {}) {
     super(message);
     this.hint = hint;
     this.phase = phase;
+    this.problems = problems;
   }
 }
 
@@ -674,10 +676,16 @@ export function scopedConnectors(digest, { skipQueries = new Set() } = {}) {
   return [...found.entries()].map(([connector, where]) => ({ connector, usedBy: [...where] }));
 }
 
+// Every check runs, and all blocking problems are reported together, so one rerun fixes them all.
 async function preflight(inventory, digest, env) {
+  const problems = [];
+  const problem = (message, { hint } = {}) => {
+    if (problems.some(item => item.message === message)) return;
+    problems.push({ message, hint: String(hint ?? '').replace(/\s*Nothing was sent to Gemini yet\.\s*$/, '') });
+  };
   const cli = geminiCliInfo();
-  if (!cli.found) throw new ConversionError('Gemini CLI was not found.', { phase: 'preflight', hint: 'Install it with: npm install -g @google/gemini-cli   then open a new PowerShell window, run gemini once to sign in, and rerun .\\setup.ps1.' });
-  log.info('preflight', `Gemini CLI ${cli.version ?? '(version unknown)'} found via ${cli.source}: ${cli.entry}`);
+  if (!cli.found) problem('Gemini CLI was not found.', { phase: 'preflight', hint: 'Install it with: npm install -g @google/gemini-cli   then open a new PowerShell window, run gemini once to sign in, and rerun .\\setup.ps1.' });
+  else log.info('preflight', `Gemini CLI ${cli.version ?? '(version unknown)'} found via ${cli.source}: ${cli.entry}`);
   const home = process.env.GEMINI_CLI_HOME || os.homedir();
   const hasAuth = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_GENAI_USE_VERTEXAI || fs.existsSync(path.join(home, '.gemini', 'oauth_creds.json')) || fs.existsSync(path.join(home, '.gemini', 'settings.json'));
   if (!hasAuth) log.warn('preflight', 'No Gemini sign-in was found (no GEMINI_API_KEY and no ~/.gemini credentials). If the first phase stops at a sign-in prompt, run gemini once in PowerShell to sign in.');
@@ -693,7 +701,7 @@ async function preflight(inventory, digest, env) {
   if (remote.length && env.HC_ALLOW_UNSUPPORTED_CONNECTORS !== 'true') {
     const example = remote.find(read => read.url) ?? remote[0];
     const fileName = example.url && !example.fileUnknown ? decodeURIComponent(example.url.split(/[\\/]/).pop() ?? '') : '<file name>';
-    throw new ConversionError(`The selected pages read ${remote.length === 1 ? 'a file' : `${remote.length} files`} from SharePoint/OneDrive or cloud storage, which this converter cannot sign in to: ${remote.slice(0, 4).map(read => `${read.reader} of ${read.url ?? `a ${read.connector} source`} (${read.query ?? read.referencedBy})`).join('; ')}.`, { phase: 'preflight', hint: `Put the file on this PC and tell the converter where it is: sync the SharePoint/OneDrive library (the Sync button in the browser) or download the file, then add one line per file or folder to gemini/.env, for example:  HC_SOURCE_MAP_1=${example.url ?? '<URL from the PBIP>'} => C:\\Users\\<you>\\<synced folder>\\${fileName}   (a folder URL maps everything below it), and rerun .\\setup.ps1. Nothing was sent to Gemini yet.` });
+    problem(`The selected pages read ${remote.length === 1 ? 'a file' : `${remote.length} files`} from SharePoint/OneDrive or cloud storage, which this converter cannot sign in to: ${remote.slice(0, 4).map(read => `${read.reader} of ${read.url ?? `a ${read.connector} source`} (${read.query ?? read.referencedBy})`).join('; ')}.`, { phase: 'preflight', hint: `Put the file on this PC and tell the converter where it is: sync the SharePoint/OneDrive library (the Sync button in the browser) or download the file, then add one line per file or folder to gemini/.env, for example:  HC_SOURCE_MAP_1=${example.url ?? '<URL from the PBIP>'} => C:\\Users\\<you>\\<synced folder>\\${fileName}   (a folder URL maps everything below it), and rerun .\\setup.ps1. Nothing was sent to Gemini yet.` });
   }
   const mappedQueries = new Set((inventory.remoteReads ?? []).filter(read => read.mappedTo).flatMap(read => [read.query, read.originQuery]).filter(name => name != null));
   const skipQueries = new Set([...mappedQueries].filter(name => !(inventory.remoteReads ?? []).some(read => !read.mappedTo && (read.query === name || read.originQuery === name))));
@@ -704,23 +712,23 @@ async function preflight(inventory, digest, env) {
     if (connector && !(skipQueries.has(table.name) && /^SharePoint\.(?:Files|Contents)$/.test(connector))) log.warn('preflight', `Table ${table.name} is related to the selected visuals but reads ${connector}, which cannot be read live; filters that flow through it may not be reproduced.`);
   }
   if (blocking.length && env.HC_ALLOW_UNSUPPORTED_CONNECTORS !== 'true') {
-    throw new ConversionError(`The selected pages need data from connector(s) this converter has no driver for: ${blocking.map(item => `${item.connector} (${item.usedBy.slice(0, 3).join(', ')})`).join('; ')}.`, { phase: 'preflight', hint: 'Live data can come from PostgreSQL, and from CSV, JSON and Excel (.xlsx/.xlsm) files on this PC or a network share (SharePoint/OneDrive files through HC_SOURCE_MAP in gemini/.env). Choose pages that use those sources, or set HC_ALLOW_UNSUPPORTED_CONNECTORS=true in gemini/.env to build anyway with labeled placeholders.' });
+    problem(`The selected pages need data from connector(s) this converter has no driver for: ${blocking.map(item => `${item.connector} (${item.usedBy.slice(0, 3).join(', ')})`).join('; ')}.`, { phase: 'preflight', hint: 'Live data can come from PostgreSQL, and from CSV, JSON and Excel (.xlsx/.xlsm) files on this PC or a network share (SharePoint/OneDrive files through HC_SOURCE_MAP in gemini/.env). Choose pages that use those sources, or set HC_ALLOW_UNSUPPORTED_CONNECTORS=true in gemini/.env to build anyway with labeled placeholders.' });
   }
   for (const source of inventory.fileSources ?? []) {
     if (source.available) continue;
     log.warn('preflight', `File source not readable from this PC: ${source.path} (${source.error})${sourceInScope(source) ? '' : ' - not used by the selected pages'}.`);
   }
   const needed = (inventory.fileSources ?? []).filter(source => !source.available && sourceInScope(source));
-  if (needed.length) throw new ConversionError(`The selected pages read file(s) this PC cannot open: ${needed.map(source => `${source.path}${source.error ? ` (${source.error === 'TIMEOUT' ? 'no answer within 15 s' : source.error})` : ''}`).join(', ')}.`, { phase: 'preflight', hint: `Connect to VPN / the network share, check the path exists for your Windows account (and that the M parameter holding the folder is right)${needed.some(source => source.mappedBy) ? '; for a mapped file check the HC_SOURCE_MAP line in gemini/.env' : ''}, then rerun .\\setup.ps1.` });
+  if (needed.length) problem(`The selected pages read file(s) this PC cannot open: ${needed.map(source => `${source.path}${source.error ? ` (${source.error === 'TIMEOUT' ? 'no answer within 15 s' : source.error})` : ''}`).join(', ')}.`, { phase: 'preflight', hint: `Connect to VPN / the network share, check the path exists for your Windows account (and that the M parameter holding the folder is right)${needed.some(source => source.mappedBy) ? '; for a mapped file check the HC_SOURCE_MAP line in gemini/.env' : ''}, then rerun .\\setup.ps1.` });
   // Excel workbooks: the file opens, and every sheet/table/name the report navigates to exists.
   for (const source of (inventory.fileSources ?? []).filter(item => item.reader === 'Excel.Workbook' && item.kind === 'file' && item.available && sourceInScope(item))) {
-    if (source.workbookError) throw new ConversionError(`The selected pages read the Excel workbook ${source.path}, which cannot be opened: ${source.workbookError.message}`, { phase: 'preflight', hint: `${excelErrorHint(source.workbookError) ?? 'Open the file in Excel and save it again as .xlsx.'} Nothing was sent to Gemini yet.` });
+    if (source.workbookError) { problem(`The selected pages read the Excel workbook ${source.path}, which cannot be opened: ${source.workbookError.message}`, { phase: 'preflight', hint: `${excelErrorHint(source.workbookError) ?? 'Open the file in Excel and save it again as .xlsx.'} Nothing was sent to Gemini yet.` }); continue; }
     const available = source.workbook?.items ?? [];
     const wanted = (source.excel?.items ?? []).filter(item => !item.unknown && (item.query == null || !scopedFiles.size || directQueries.has(item.query)));
     const missing = wanted.filter(item => Number.isInteger(item.index) ? item.index >= available.length : !available.some(entry => entry.name.toLowerCase() === String(item.item).toLowerCase() && (!item.kind || entry.kind === item.kind)));
     if (missing.length) {
       const describe = item => Number.isInteger(item.index) ? `item number ${item.index}` : `${item.kind ? `${item.kind.toLowerCase()} ` : ''}"${item.item}"${item.query ? ` (read by ${item.query})` : ''}`;
-      throw new ConversionError(`The Excel workbook ${source.path} has no ${missing.map(describe).join(', ')}. It has: ${available.map(entry => `${entry.name} (${entry.kind})`).join(', ') || 'no sheets'}.`, { phase: 'preflight', hint: 'The sheet, table or named range was renamed or deleted since the report was built. Restore it (or use the workbook version the report was built on), then rerun .\\setup.ps1. Nothing was sent to Gemini yet.' });
+      problem(`The Excel workbook ${source.path} has no ${missing.map(describe).join(', ')}. It has: ${available.map(entry => `${entry.name} (${entry.kind})`).join(', ') || 'no sheets'}.`, { phase: 'preflight', hint: 'The sheet, table or named range was renamed or deleted since the report was built. Restore it (or use the workbook version the report was built on), then rerun .\\setup.ps1. Nothing was sent to Gemini yet.' });
     }
     if (wanted.some(item => Number.isInteger(item.index))) log.warn('preflight', `${source.path}: the report picks a workbook item by position ({0}); the converter uses sheets in workbook order, then tables, then named ranges. Compare that visual with Power BI.`);
   }
@@ -734,25 +742,34 @@ async function preflight(inventory, digest, env) {
   // Only connections the selected pages read (per model file); a connection used elsewhere must not block.
   const scopedPostgres = (inventory.postgresSources ?? []).filter(source => !scopedFiles.size || source.referencedBy.some(file => scopedFiles.has(file)));
   for (const source of (inventory.postgresSources ?? []).filter(item => !scopedPostgres.includes(item))) log.info('preflight', `PostgreSQL ${source.server}/${source.database} is not used by the selected pages; not checked.`);
+  const driverInstalled = fs.existsSync(path.join(root, 'node_modules', 'pg', 'package.json'));
+  if (scopedPostgres.length && !driverInstalled) problem('The PostgreSQL driver (pg) is not installed.', { hint: 'Run npm install in the gemini folder (or rerun .\\setup.ps1 with Internet/npm access).' });
   for (const source of scopedPostgres) {
-    if (!env.PG_USER || !env.PG_PASSWORD) throw new ConversionError(`The report reads PostgreSQL ${source.server}/${source.database}, but PG_USER/PG_PASSWORD are empty.`, { phase: 'preflight', hint: `Open ${rel(path.join(root, '.env'))} and fill PG_USER and PG_PASSWORD with a read-only login, then rerun .\\setup.ps1.` });
-    if (!fs.existsSync(path.join(root, 'node_modules', 'pg', 'package.json'))) throw new ConversionError('The PostgreSQL driver (pg) is not installed.', { phase: 'preflight', hint: 'Run npm install in the gemini folder (or rerun .\\setup.ps1 with Internet/npm access).' });
+    const before = problems.length;
+    if (!env.PG_USER || !env.PG_PASSWORD) problem(`The report reads PostgreSQL ${source.server}/${source.database}, but PG_USER/PG_PASSWORD are empty.`, { hint: `Open ${path.join(root, '.env')} and fill PG_USER and PG_PASSWORD with a read-only login, then rerun .\\setup.ps1.` });
     // Native SQL is opt-in even when the parser cannot read a query; parsed ones must have their $n values.
     const unresolved = source.unresolvedNativeQueries ?? (source.hasUnresolvedNativeQuery ? 1 : 0);
     if ((source.nativeQueries?.length || unresolved) && env.PG_ALLOW_NATIVE_QUERIES !== 'true') {
-      throw new ConversionError(`PostgreSQL ${source.server}/${source.database}: the report runs its own SQL (Value.NativeQuery), which needs your explicit approval.`, { phase: 'preflight', hint: `${postgresHint('PG_ALLOW_NATIVE_QUERIES')} Nothing was sent to Gemini yet.` });
+      problem(`PostgreSQL ${source.server}/${source.database}: the report runs its own SQL (Value.NativeQuery), which needs your explicit approval.`, { hint: postgresHint('PG_ALLOW_NATIVE_QUERIES') });
     }
     if (unresolved) log.warn('preflight', `PostgreSQL ${source.server}/${source.database}: ${unresolved} native query(ies) could not be read by the scanner (computed SQL or parameters). Gemini will implement them from the M code; the backend check tests them.`);
-    try { listLiveSources({ postgresSources: [{ ...source, hasUnresolvedNativeQuery: false }] }, env); }
-    catch (error) { if (!/No supported PostgreSQL table/.test(error.message)) throw new ConversionError(`PostgreSQL ${source.server}/${source.database}: ${error.message}`, { phase: 'preflight', hint: `${postgresHint(error)} Nothing was sent to Gemini yet.` }); }
+    if (env.PG_USER && env.PG_PASSWORD) {
+      try { listLiveSources({ postgresSources: [{ ...source, hasUnresolvedNativeQuery: false }] }, { ...env, PG_ALLOW_NATIVE_QUERIES: 'true' }); }
+      catch (error) { if (!/No supported PostgreSQL table/.test(error.message)) problem(`PostgreSQL ${source.server}/${source.database}: ${error.message}`, { hint: postgresHint(error) }); }
+    }
+    // A connection test needs a login and the driver; other problems of this source are reported without it.
+    if (!env.PG_USER || !env.PG_PASSWORD || !driverInstalled) continue;
     if (env.HC_SKIP_SOURCE_PREFLIGHT === 'true') { log.warn('preflight', `Skipping PostgreSQL connection test for ${source.server}/${source.database} (HC_SKIP_SOURCE_PREFLIGHT=true).`); continue; }
     try {
       const info = await testPostgresConnection(source, env);
-      log.info('preflight', `PostgreSQL ${info.host}:${info.port}/${info.database} reachable as ${info.user} (${info.ms} ms).`);
+      log.info('preflight', `PostgreSQL ${info.host}:${info.port}/${info.database} reachable as ${info.user} (${info.ms} ms${info.ssl ? `, ${info.ssl}` : ''}).`);
     } catch (error) {
-      throw new ConversionError(`Cannot connect to PostgreSQL ${source.server}/${source.database}: ${redact(error.message)}`, { phase: 'preflight', hint: `${postgresHint(error)} Nothing was sent to Gemini yet.` });
+      problem(`Cannot connect to PostgreSQL ${source.server}/${source.database}: ${redact(error.message)}`, { hint: postgresHint(error) });
     }
+    if (problems.length > before) log.warn('preflight', `PostgreSQL ${source.server}/${source.database}: ${problems.length - before} problem(s), listed at the end.`);
   }
+  if (problems.length === 1) throw new ConversionError(problems[0].message, { phase: 'preflight', hint: `${problems[0].hint} Nothing was sent to Gemini yet.`.trim() });
+  if (problems.length) throw new ConversionError(`${problems.length} problems must be fixed before the run. Nothing was sent to Gemini yet.`, { phase: 'preflight', problems });
 }
 
 // ---------- main ----------
@@ -1056,6 +1073,10 @@ export function reportFailure(error) {
   log.error(error?.phase ?? null, '============================================================');
   log.error(error?.phase ?? null, `CONVERSION STOPPED${error?.phase ? ` at ${error.phase}` : ''}: ${message}`);
   if (error?.hint) log.error(error.phase ?? null, `What to do: ${redact(error.hint)}`);
+  for (const [index, item] of (error?.problems ?? []).entries()) {
+    log.error(error.phase ?? null, `Problem ${index + 1}: ${redact(item.message)}`);
+    if (item.hint) log.error(error.phase ?? null, `What to do: ${redact(item.hint)}`);
+  }
   if (!(error instanceof ConversionError) && error?.stack) log.detail(null, redact(error.stack));
   if (currentLogFile()) log.error(error?.phase ?? null, `Full log: ${currentLogFile()}`);
   log.error(error?.phase ?? null, '============================================================');

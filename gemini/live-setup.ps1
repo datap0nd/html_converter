@@ -273,7 +273,7 @@ function Invoke-NativeLogged {
             if (-not $Quiet) { Write-Host $line }
             $trimmed = $line.Trim()
             if ($trimmed) {
-                if ($trimmed -match 'CONVERSION STOPPED|What to do:|\[selftest\] FAILED|ERROR \d+ \(0x') { $script:NativeKeyLines.Add($trimmed) }
+                if ($trimmed -match 'CONVERSION STOPPED|Problem \d+:|What to do:|\[selftest\] FAILED|ERROR \d+ \(0x') { $script:NativeKeyLines.Add($trimmed) }
                 if ($trimmed -match 'Full log:\s*(.+)$') { $script:NativeFullLog = $Matches[1].Trim() }
                 $script:NativeTail.Add($trimmed)
                 if ($script:NativeTail.Count -gt 8) { $script:NativeTail.RemoveAt(0) }

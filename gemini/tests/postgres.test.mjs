@@ -29,7 +29,10 @@ test('PostgreSQL report converts end to end through the pg driver helpers', { sk
 test('PostgreSQL problems stop in preflight with the right fix and no secret in the output', { skip }, () => {
   const cases = [
     [{ PG_PASSWORD: 'definitely-wrong-password' }, /rejected PG_USER\/PG_PASSWORD/],
-    [{ PG_SSL_MODE: 'verify-full' }, /does not accept TLS|certificate/],
+    // The work PC's case: a server without TLS; the hint names the exact .env line.
+    [{ PG_SSL_MODE: 'verify-full' }, /does not support SSL connections[\s\S]*What to do: This PostgreSQL server does not offer encrypted connections at all, so Power BI also connects to it unencrypted\. To connect the same way: open gemini\\\.env \(next to setup\.ps1\), change the line PG_SSL_MODE=verify-full to PG_SSL_MODE=disable/],
+    [{ PG_SSL_MODE: 'require' }, /does not support SSL connections/],
+    [{ PG_SSL_MODE: 'strict' }, /PG_SSL_MODE in gemini\/\.env is "strict"; it must be verify-full, require or disable/],
     [{ PG_ALLOW_NATIVE_QUERIES: 'false' }, /set PG_ALLOW_NATIVE_QUERIES=true/]
   ];
   for (const [change, hint] of cases) {

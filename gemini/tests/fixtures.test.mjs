@@ -61,10 +61,12 @@ test('SalesPostgres: navigation tables and both native queries are found with th
   assert.equal(source.hasUnresolvedNativeQuery, false);
 }));
 
-test('SalesPostgres: missing credentials stop the run before Gemini with the .env fix', () => inSandbox('SalesPostgres', ({ sandbox }) => {
+test('SalesPostgres: missing credentials and unapproved native SQL are reported together before Gemini', () => inSandbox('SalesPostgres', ({ sandbox }) => {
   const result = preflight(sandbox);
   assert.equal(result.code, 1);
-  assert.match(result.stdout, /CONVERSION STOPPED at preflight: The report reads PostgreSQL pg-host:5432\/analytics, but PG_USER\/PG_PASSWORD are empty/);
+  assert.match(result.stdout, /CONVERSION STOPPED at preflight: 2 problems must be fixed before the run\. Nothing was sent to Gemini yet\./);
+  assert.match(result.stdout, /Problem 1: The report reads PostgreSQL pg-host:5432\/analytics, but PG_USER\/PG_PASSWORD are empty\.\n.*What to do: Open .*\.env and fill PG_USER and PG_PASSWORD/);
+  assert.match(result.stdout, /Problem 2: PostgreSQL pg-host:5432\/analytics: the report runs its own SQL \(Value\.NativeQuery\)[^\n]*\n.*What to do: .*PG_ALLOW_NATIVE_QUERIES=true/);
   assert.equal(result.stderr, '');
 }));
 
