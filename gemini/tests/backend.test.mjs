@@ -229,7 +229,7 @@ test('the report server serves the page and assets, never backend code, and guar
   writeBackend(dir, goodBackend);
   const { url, close, port } = await startReportServer({ dynamicDir: dir, backend, inventory, port: 0, attempts: 1, limit: 10, concurrency: 2, log, redact: text => text.replaceAll('secret-pass', '[redacted]') });
   try {
-    assert.equal((await request(url)).body, '<!doctype html><p>report</p>');
+    assert.match((await request(url)).body, /^<!doctype html><p>report<\/p>\n<script data-html-converter="toolbar">/, 'the page, plus the converter toolbar');
     assert.equal((await request(`${url}style.css`)).status, 200);
     for (const blocked of ['backend.mjs', '.env', '..%2Fbackend.mjs', '%2e%2e/%2e%2e/package.json']) assert.equal((await request(`${url}${blocked}`)).status, 404, blocked);
     const ok = await request(`${url}api/report?visual=v1&filters=%7B%7D`);

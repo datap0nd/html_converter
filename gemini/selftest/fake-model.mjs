@@ -39,7 +39,37 @@ for (const element of document.querySelectorAll('[data-role="data"]')) {
 `;
 }
 
-export function backendSource(inventory, digest, { broken = false, environmentIssue = false, leakTimer = false, placeholder = false, blockingQuery = false } = {}) {
+// The rows the fake Power BI runner (fake-pbi-runner.mjs) returns for a visual, so
+// "parity" backends can match (or deliberately miss) Power BI.
+export function parityRows(groupRefs, valueRefs, scale = 1) {
+  const count = groupRefs.length ? 2 : 1;
+  return Array.from({ length: count }, (_, i) => ({
+    ...Object.fromEntries(groupRefs.map(ref => [ref, `${ref} ${i}`])),
+    ...Object.fromEntries(valueRefs.map((ref, j) => [ref, (100 + j * 10 + i) * scale]))
+  }));
+}
+
+// Grouping and value fields of each data visual, split the way dax-query.mjs splits them.
+export function visualFieldSpecs(digest) {
+  const specs = {};
+  for (const page of digest?.pages ?? []) for (const visual of page.visuals ?? []) {
+    if (visual.role !== 'data') continue;
+    const groupRefs = [], valueRefs = [], seen = new Set();
+    for (const projections of Object.values(visual.fields ?? {})) {
+      const active = projections.some(item => 'active' in item) ? projections.filter(item => item.active !== false) : projections;
+      for (const field of active) {
+        if (!field.queryRef || seen.has(field.queryRef)) continue;
+        seen.add(field.queryRef);
+        if (field.kind === 'column' || field.kind === 'hierarchyLevel') groupRefs.push(field.queryRef);
+        else if (field.kind === 'measure' || field.kind === 'aggregation') valueRefs.push(field.queryRef);
+      }
+    }
+    specs[visual.id] = { groupRefs, valueRefs };
+  }
+  return specs;
+}
+
+export function backendSource(inventory, digest, { broken = false, environmentIssue = false, leakTimer = false, placeholder = false, blockingQuery = false, parity = null, parityFixed = null } = {}) {
   const csv = (digest?.sources?.directCsv ?? []).map(source => source.path);
   // The first Excel sheet/table the report navigates to (headers promoted, as Power BI's generated M does).
   const excel = (digest?.sources?.files ?? []).filter(source => source.reader === 'Excel.Workbook' && source.kind === 'file').flatMap(source => (source.excel?.items ?? []).filter(item => item.item).map(item => ({ path: source.path, item: item.item, kind: item.kind ?? 'Sheet', useHeaders: true })))[0] ?? null;
@@ -47,6 +77,9 @@ export function backendSource(inventory, digest, { broken = false, environmentIs
   return `import fs from 'node:fs';
 import { tableRows } from './rows.mjs';
 const CSV_FILES = ${JSON.stringify(csv)};
+const PARITY = ${JSON.stringify(parity ? { specs: visualFieldSpecs(digest), scale: parity === 'wrong' ? 100 : 1 } : null)};
+const PARITY_FIXED = ${JSON.stringify(parityFixed ?? {})};
+${parity ? `const parityRows = ${parityRows.toString()};` : ''}
 const EXCEL = ${JSON.stringify(excel)};
 const DATA_VISUALS = new Set(${JSON.stringify(dataVisuals)});
 export async function createBackend({ env, helpers }) {
@@ -67,6 +100,12 @@ export async function createBackend({ env, helpers }) {
     },
     async query({ visualId, limit = 2000 }) {
       if (!DATA_VISUALS.has(visualId)) throw new Error('Unknown visual ' + visualId);
+      if (PARITY_FIXED[visualId]) return { rows: PARITY_FIXED[visualId], columns: Object.keys(PARITY_FIXED[visualId][0] ?? {}), placeholder: false, limitations: [] };
+      if (PARITY && PARITY.specs[visualId]) {
+        const spec = PARITY.specs[visualId];
+        const rows = parityRows(spec.groupRefs, spec.valueRefs, PARITY.scale);
+        return { rows, columns: [...spec.groupRefs, ...spec.valueRefs], placeholder: false, limitations: [] };
+      }
       ${blockingQuery ? "if (visualId === [...DATA_VISUALS].at(-1)) { for (;;) {} }" : ''}
       ${placeholder ? "if (visualId === [...DATA_VISUALS][0]) return { rows: [], columns: [], placeholder: true, limitations: ['Custom visual runtime is not available (test scenario).'] };" : ''}
       if (sources.length) {
@@ -114,7 +153,7 @@ export function phaseFiles({ prompt, cwd, scenario = '', count = 0 }) {
       break;
     case '02':
       add('output/dynamic/index.html', reportHtml(inventory, { omitVisualIds: switches.has('missing-visual') && lastData ? [lastData.id] : [] }));
-      add('output/dynamic/backend.mjs', backendSource(inventory, digest, { broken: switches.has('broken-backend'), environmentIssue: switches.has('environment-issue'), leakTimer: switches.has('leak-timer'), placeholder: switches.has('placeholder'), blockingQuery: switches.has('blocking-query') }));
+      add('output/dynamic/backend.mjs', backendSource(inventory, digest, { broken: switches.has('broken-backend'), environmentIssue: switches.has('environment-issue'), leakTimer: switches.has('leak-timer'), placeholder: switches.has('placeholder'), blockingQuery: switches.has('blocking-query'), parity: switches.has('parity-wrong') || switches.has('parity-unfixable') ? 'wrong' : switches.has('parity-keys') ? 'keys' : null }));
       add('output/dynamic/rows.mjs', rowsModule);
       add(artifact, { implemented: dataVisuals.map(visual => visual.id), placeholders: [], limitations: [], sourcePaths: [], credentialsNeeded: [], filtersContract: {} });
       break;
@@ -131,11 +170,15 @@ export function phaseFiles({ prompt, cwd, scenario = '', count = 0 }) {
       add(artifact, { status: 'complete', pageId: current?.id, implementedVisualIds: (current?.missingVisuals ?? []).map(visual => visual.id), remainingVisualIds: [], limitations: [], sourcePaths: [] });
       break;
     }
-    case '06':
+    case '06': {
+      // A parity fix request carries Power BI's rows; a well-behaved model makes the backend return them.
+      const request = readJson(cwd, 'work/fix-request.json');
+      const fixed = request?.parity ? Object.fromEntries(request.parity.visuals.map(visual => [visual.visualId, visual.powerBiRows])) : null;
       add('output/dynamic/index.html', reportHtml(inventory));
-      add('output/dynamic/backend.mjs', backendSource(inventory, digest, { placeholder: switches.has('placeholder') }));
+      add('output/dynamic/backend.mjs', backendSource(inventory, digest, { placeholder: switches.has('placeholder'), parity: switches.has('parity-unfixable') ? 'wrong' : switches.has('parity-wrong') || switches.has('parity-keys') ? 'keys' : null, parityFixed: switches.has('parity-unfixable') ? null : fixed }));
       add(artifact, { status: 'fixed', fixed: ['test fix'], remaining: [], changedFiles: ['output/dynamic/backend.mjs'] });
       break;
+    }
     default:
       return { files: [], text: 'Unknown phase.' };
   }

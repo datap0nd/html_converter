@@ -773,7 +773,7 @@ async function runPool(items, size, worker) {
 }
 
 async function childChecks(input, { send, redact, inFlight }) {
-  const { backendFile, root, inputDir, env, inventory, digest, limit, concurrency, timeouts, tasks, isolate, first } = input;
+  const { backendFile, root, inputDir, env, inventory, digest, limit, concurrency, timeouts, tasks, isolate, first, collectRows } = input;
   const issue = (stage, message, error, extra = {}) => send({ type: 'issue', issue: { stage, message: redact(message), ...(error ? { error: redactInfo(error, redact) } : {}), ...extra } });
   const progress = (text, level = 'info') => send({ type: 'progress', text: redact(text), level });
   let counter = 0;
@@ -874,6 +874,10 @@ async function childChecks(input, { send, redact, inFlight }) {
     let analysis;
     try { analysis = analyzeQueryResult(result, limit); } catch (error) { analysis = { contractError: `returned a result that could not be inspected (${error.message})` }; }
     if (analysis.sample) analysis.sample = redact(analysis.sample);
+    // The rows themselves, for the comparison with Power BI (default-state queries only).
+    if (collectRows && !task.filters && Array.isArray(result?.rows) && !analysis.contractError) {
+      try { analysis.rows = JSON.parse(JSON.stringify(result.rows.slice(0, limit), jsonReplacer)); } catch { /* reported as a contract error above */ }
+    }
     if (analysis.limitations) analysis.limitations = analysis.limitations.map(redact);
     if (analysis.suspicious) analysis.suspicious = analysis.suspicious.map(item => ({ ...item, message: redact(item.message) }));
     await send({ type: 'query-done', key: task.key, ms, analysis });
@@ -1058,7 +1062,7 @@ export async function checkBackend(options = {}) {
     limit = QUERY_ROW_LIMIT, concurrency = QUERY_CONCURRENCY, perQueryTimeoutMs = 90_000, totalTimeoutMs = 15 * 60_000,
     importTimeoutMs = 30_000, createTimeoutMs = 60_000, healthTimeoutMs = perQueryTimeoutMs, closeTimeoutMs = 10_000, syntaxTimeoutMs = 60_000,
     graceMs = 5_000, noticeMs = 15_000, maxRestarts = 3, probeSources = true, probeTimeoutMs = 15_000, filterCases = [],
-    onProgress, onOutput
+    collectRows = false, onProgress, onOutput
   } = options;
   const started = Date.now();
   const deadline = started + totalTimeoutMs;
@@ -1122,7 +1126,7 @@ export async function checkBackend(options = {}) {
           break;
         }
         const warnings = analysis.suspicious ?? [];
-        visuals.push({ visualId: task.visualId, page: task.page, type: task.type, title: task.title, rowCount: analysis.rowCount, ms: message.ms, placeholder: analysis.placeholder === true, columns: analysis.columns ?? [], sample: analysis.sample ?? '[]', suspicious: warnings });
+        visuals.push({ visualId: task.visualId, page: task.page, type: task.type, title: task.title, rowCount: analysis.rowCount, ms: message.ms, placeholder: analysis.placeholder === true, columns: analysis.columns ?? [], sample: analysis.sample ?? '[]', suspicious: warnings, ...(analysis.rows ? { rows: analysis.rows, limitations: analysis.limitations ?? [] } : {}) });
         for (const warning of warnings) suspicious.push({ visualId: task.visualId, ...warning, message: `${describeTask(task)}: ${warning.message}` });
         if (analysis.placeholder) placeholders.push({ visualId: task.visualId, page: task.page, type: task.type, title: task.title, limitations: analysis.limitations ?? [] });
         const note = analysis.placeholder ? ` - placeholder: ${oneLine((analysis.limitations ?? []).join('; ') || 'no reason given', 160)}` : warnings.length ? ` - warning: ${oneLine(warnings.map(item => item.message).join('; '), 160)}` : '';
@@ -1161,7 +1165,7 @@ export async function checkBackend(options = {}) {
       setupDone = false;
       done = false;
       const run = await runCheckChild({
-        input: { backendFile: file, root, inputDir, env, inventory, digest, limit, concurrency, timeouts, tasks: ordered.map(({ key, visualId, filters }) => ({ key, visualId, filters })), isolate: isolateNext, first },
+        input: { backendFile: file, root, inputDir, env, inventory, digest, limit, concurrency, timeouts, tasks: ordered.map(({ key, visualId, filters }) => ({ key, visualId, filters })), isolate: isolateNext, first, collectRows },
         cwd: fs.existsSync(root) ? root : process.cwd(),
         deadline, graceMs, noticeMs,
         onMessage,
@@ -1245,6 +1249,14 @@ export async function checkBackend(options = {}) {
   for (const name of new Set(filterChecks.map(check => check.case))) {
     const list = filterChecks.filter(check => check.case === name);
     if (list.length && list.every(check => check.unchanged)) suspicious.push({ kind: 'filter-ignored', message: `Every visual returned exactly its default result with ${name}; the filters may be ignored or use a different shape than the page sends.` });
+  }
+
+  // Rows keyed by the visual's field queryRefs can be compared with Power BI; warn when none are used.
+  const fieldRefs = new Map((digest?.pages ?? []).flatMap(page => (page.visuals ?? []).map(visual => [visual.id, Object.values(visual.fields ?? {}).flat().map(field => field?.queryRef).filter(Boolean)])));
+  for (const visual of visuals) {
+    const refs = fieldRefs.get(visual.visualId) ?? [];
+    if (!refs.length || visual.placeholder || refs.some(ref => visual.columns.includes(ref))) continue;
+    suspicious.push({ visualId: visual.visualId, kind: 'field-names', message: `${visual.visualId}: rows are not keyed by the visual's field names (${refs.slice(0, 4).join(', ')}${refs.length > 4 ? ', ...' : ''}), so they cannot be compared with Power BI.` });
   }
 
   const context = { env, inventory, digest, root };

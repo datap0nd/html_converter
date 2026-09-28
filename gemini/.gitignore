@@ -16,3 +16,5 @@ node_modules/
 .env*
 !.env.example
 *.log
+# ADOMD.NET client downloaded for the Power BI Desktop comparison.
+tools/

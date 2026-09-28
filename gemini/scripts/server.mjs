@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
+import { fileURLToPath } from 'node:url';
 import { QUERY_ROW_LIMIT, QUERY_CONCURRENCY, withTimeout, toList, issueText } from './backend-check.mjs';
 
 // Static files the page may load from its own folder. Never backend modules
@@ -25,6 +26,17 @@ const STATIC_TYPES = {
   '.txt': 'text/plain; charset=utf-8'
 };
 const MAX_FILTERS_LENGTH = 64 * 1024;
+const TOOLBAR_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'report-toolbar.js');
+
+// The served page gets the converter's toolbar (Refresh, Power BI check) before </body>;
+// the saved index.html is never changed.
+export function withToolbar(html) {
+  let script = '';
+  try { script = fs.readFileSync(TOOLBAR_FILE, 'utf8'); } catch { return html; }
+  const tag = `<script data-html-converter="toolbar">${script.replaceAll('</', '<\\/')}</script>`;
+  const at = html.toLowerCase().lastIndexOf('</body>');
+  return at < 0 ? `${html}\n${tag}\n` : `${html.slice(0, at)}${tag}\n${html.slice(at)}`;
+}
 const MAX_QUEUED = 200;
 
 class RequestError extends Error {
@@ -100,18 +112,21 @@ function installCrashGuards(log) {
 
 // options: dynamicDir, backend ({ query }), inventory (pages -> visuals), port
 // (first port to try), attempts (ports tried before a random free one), limit,
-// concurrency, queryTimeoutMs, log ({ info, warn, error, detail }), redact(text).
+// concurrency, queryTimeoutMs, log ({ info, warn, error, detail }), redact(text),
+// status() -> extra data for GET /api/status (the Power BI comparison), and
+// reloadBackend() -> a fresh backend for GET /api/refresh (the toolbar's Refresh button).
 // Returns { server, url, port, close() }.
 export async function startReportServer({
   dynamicDir, backend, inventory, port = 8765, attempts = 10,
   limit = QUERY_ROW_LIMIT, concurrency = QUERY_CONCURRENCY, queryTimeoutMs = 120_000,
-  log, redact = text => String(text)
+  log, redact = text => String(text), status = () => ({}), reloadBackend = null
 }) {
   const logger = log ?? { info() {}, warn() {}, error() {}, detail() {} };
   const htmlFile = path.join(dynamicDir, 'index.html');
   const visualIds = new Set(toList(inventory?.pages).flatMap(page => toList(page?.visuals).map(visual => visual?.id)).filter(Boolean));
   const limiter = createLimiter(Math.max(1, concurrency));
-  let bound = null;
+  let bound = null, refreshing = null, refreshedAt = null;
+  const startedAt = new Date().toISOString();
   let hosts = new Set();
   let origins = new Set();
   const server = http.createServer({ maxHeaderSize: 64 * 1024 }, async (req, res) => {
@@ -127,6 +142,28 @@ export async function startReportServer({
     // sites (Origin) and DNS-rebinding pages (Host) from reading report data.
     if (!['GET', 'HEAD'].includes(req.method) || (req.headers.origin && !origins.has(req.headers.origin)) || (req.headers.host && !hosts.has(String(req.headers.host).toLowerCase()))) {
       send(403, jsonText({ error: 'Forbidden.' }));
+      return;
+    }
+    if (url.pathname === '/api/status') {
+      let extra = {};
+      try { extra = status() ?? {}; } catch (error) { logger.warn('server', `Status failed: ${error.message}`); }
+      send(200, jsonText({ startedAt, refreshedAt, refreshable: typeof reloadBackend === 'function', ...extra }));
+      return;
+    }
+    if (url.pathname === '/api/refresh') {
+      if (typeof reloadBackend !== 'function') { send(404, jsonText({ error: 'Refresh is not available.' })); return; }
+      try {
+        // One reload at a time; a second click waits for the first.
+        refreshing ??= Promise.resolve().then(() => reloadBackend()).finally(() => { refreshing = null; });
+        backend = await refreshing;
+        refreshedAt = new Date().toISOString();
+        logger.info('server', 'Data refresh requested in the browser: the report backend was restarted.');
+        send(200, jsonText({ ok: true, refreshedAt }));
+      } catch (error) {
+        const message = redact(issueText(error)).slice(0, 1000);
+        logger.warn('server', `Refresh failed: ${message}`);
+        send(500, jsonText({ error: message }));
+      }
       return;
     }
     if (url.pathname === '/api/report') {
@@ -157,7 +194,13 @@ export async function startReportServer({
       }
       return;
     }
-    const file = url.pathname === '/' ? { file: htmlFile, type: STATIC_TYPES['.html'] } : staticFile(dynamicDir, url.pathname);
+    if (url.pathname === '/' || url.pathname === '/index.html') {
+      let html;
+      try { html = fs.readFileSync(htmlFile, 'utf8'); } catch (error) { send(404, 'Not found', 'text/plain; charset=utf-8'); logger.warn('server', `Could not read index.html: ${error.message}`); return; }
+      send(200, withToolbar(html), STATIC_TYPES['.html']);
+      return;
+    }
+    const file = staticFile(dynamicDir, url.pathname);
     if (!file || !fs.existsSync(file.file)) { send(404, 'Not found', 'text/plain; charset=utf-8'); return; }
     res.writeHead(200, { ...headers, 'Content-Type': file.type });
     if (req.method === 'HEAD') { res.end(); return; }

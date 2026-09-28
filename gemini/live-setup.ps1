@@ -562,6 +562,7 @@ try {
             $nodeArguments += (Join-Path $scriptsDir 'selftest.mjs')
         } else {
             Write-Host 'Starting Gemini report reconstruction and live HTML server (Ctrl+C to stop)...' -ForegroundColor Green
+            Write-Host 'Tip: keep the report open in Power BI Desktop (click Refresh there first). Every visual is then compared with Power BI and differences are sent back to Gemini to fix.' -ForegroundColor DarkGray
             Write-Host 'Progress is printed live below and saved under gemini\logs.' -ForegroundColor DarkGray
             $nodeArguments += (Join-Path $scriptsDir 'start-live-report.mjs')
             if ($SelectedPageScope -eq 'First2') { $nodeArguments += @('--page-limit', '2') }

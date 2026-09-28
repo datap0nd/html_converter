@@ -91,6 +91,15 @@ function tmdlMeasure(child) {
   };
 }
 
+// Auto date/time: a date column's variation points at its hidden LocalDateTable hierarchy.
+function dateVariation(column) {
+  const variation = (column.children ?? []).find(child => child.kind === 'variation');
+  const target = variation?.props?.defaultHierarchy;
+  if (!target) return null;
+  const parsed = parseQualifiedColumn(target);
+  return parsed.table ? { table: parsed.table, hierarchy: parsed.column } : null;
+}
+
 function tmdlTable(node, file) {
   const table = { name: node.name, source: file, columns: [], measures: [], partitions: [], hierarchies: [] };
   if (node.description) table.description = node.description;
@@ -108,7 +117,8 @@ function tmdlTable(node, file) {
         ...(child.props.sortByColumn ? { sortByColumn: tmdlReferenceName(child.props.sortByColumn) } : {}),
         ...(child.props.isHidden ? { hidden: true } : {}),
         ...(child.props.isKey ? { key: true } : {}),
-        ...(child.description ? { description: child.description } : {})
+        ...(child.description ? { description: child.description } : {}),
+        ...(dateVariation(child) ? { variation: dateVariation(child) } : {})
       });
     } else if (child.kind === 'measure') {
       table.measures.push(tmdlMeasure(child));

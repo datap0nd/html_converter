@@ -14,10 +14,13 @@ import { testPostgresConnection, postgresHint, listLiveSources } from './sources
 import { log, startLogFile, currentLogFile, addSecretsFromEnv, redact, formatDuration } from './log.mjs';
 import { checkBackend, loadBackend, closeBackend, classifyBackendIssue, issueText, BACKEND_CONTRACT, QUERY_ROW_LIMIT } from './backend-check.mjs';
 import { startReportServer } from './server.mjs';
+import { parityQueries, compareVisual, paritySummary, parityFixRequest } from './parity.mjs';
+import { findDesktopInstances, portAnswers, runPowerBiQueries } from './pbi-desktop.mjs';
 
 const MODEL = 'gemini-3.8-flash';
 const STATE_VERSION = 2;
 const MAX_FIX_ROUNDS = 2;
+const MAX_PARITY_ROUNDS = 2;
 
 const phases = [
   ['01-interpret', 'prompts/live-01-interpret.md', 'work/live-interpretation.json'],
@@ -592,7 +595,7 @@ export { classifyBackendIssue };
 // healthcheck, every data visual query) and logs each step as it happens.
 export async function selfCheckBackend(backendFile, inventory, env, { digest = null, ...options } = {}) {
   return checkBackend({
-    backendFile, root, inputDir, env, inventory, digest,
+    backendFile, root, inputDir, env, inventory, digest, collectRows: true,
     totalTimeoutMs: minutesSetting(env, 'HC_BACKEND_CHECK_MINUTES', 15),
     perQueryTimeoutMs: minutesSetting(env, 'HC_QUERY_TIMEOUT_MINUTES', 1.5),
     ...options,
@@ -874,6 +877,8 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
   // Trust comes from GEMINI_CLI_TRUST_WORKSPACE; the --skip-trust flag does not load workspace settings.
   const cli = { outputFormat: 'stream-json', skipTrust: false };
   let checked = null;
+  // The comparison with Power BI Desktop: undefined = not run yet, null = not possible.
+  let parity;
 
   if (invokeGemini) {
     removeStaleWorkspaces();
@@ -908,7 +913,7 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
         check.hash = outputsHash();
         check.coverage = coverage;
         lastCheck = check;
-        const selfcheckReport = { checkedAt: new Date().toISOString(), reason, ok: check.ok, issues: check.issues, placeholders: check.placeholders, suspicious: check.suspicious ?? [], visuals: check.visuals, health: check.health, durationMs: check.durationMs };
+        const selfcheckReport = { checkedAt: new Date().toISOString(), reason, ok: check.ok, issues: check.issues, placeholders: check.placeholders, suspicious: check.suspicious ?? [], visuals: withoutRows(check.visuals), health: check.health, durationMs: check.durationMs };
         writeJson(path.join(scope.workDir, 'live-selfcheck.json'), selfcheckReport);
         // Reviewers and fix phases read the real results from their workspace.
         writeJson(path.join(stage, 'work', 'live-selfcheck.json'), selfcheckReport);
@@ -1023,6 +1028,14 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
         state.needsFinalReview = true;
         saveCheckpoint(stateFile, state);
       }
+      // Ground truth: compare every visual with Power BI Desktop and let Gemini fix what differs.
+      parity = await powerBiParity({ inventory, digest, scope, env, check: checked });
+      for (let round = 1; parity?.fixable?.length && round <= MAX_PARITY_ROUNDS; round++) {
+        log.info('parity', `Asking Gemini to fix ${parity.fixable.length} visual(s) whose data differs from Power BI (round ${round} of ${MAX_PARITY_ROUNDS}).`);
+        await runFix({ reason: 'power-bi-parity', parity: parityFixRequest(parity.fixable) });
+        checked = await ensureBackend('after the Power BI fix', { coverage: true });
+        parity = await powerBiParity({ inventory, digest, scope, env, check: checked });
+      }
     } finally { removeGeminiWorkspace(stage); }
   }
   if (!checked) checked = await selfCheckBackend(backendFile, inventory, env, { digest });
@@ -1031,7 +1044,9 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
   writeJson(path.join(scope.workDir, 'live-validation.json'), { passed: issues.length === 0, issues, reviewStatus: review?.status });
   if (issues.length) throw new ConversionError(`Generated report failed validation: ${issues.slice(0, 5).join(' ')}`, { phase: 'validation', hint: `Progress is saved. See ${rel(path.join(scope.workDir, 'live-validation.json'))}; rerunning .\\setup.ps1 retries the repairs.` });
   if (!checked.ok) throw new ConversionError(`Generated backend check failed: ${checked.issues.map(issue => issue.message.split('\n')[0]).slice(0, 3).join(' | ')}`, { phase: 'self-check', hint: `See ${rel(path.join(scope.workDir, 'live-selfcheck.json'))}.` });
-  writeJson(path.join(scope.workDir, 'live-preflight.json'), { ok: true, sources: checked.health?.sources ?? [], visuals: checked.visuals, placeholders: checked.placeholders });
+  writeJson(path.join(scope.workDir, 'live-preflight.json'), { ok: true, sources: checked.health?.sources ?? [], visuals: withoutRows(checked.visuals), placeholders: checked.placeholders });
+  // Without Gemini (or when it was skipped) the comparison still runs, as a report.
+  if (parity === undefined) parity = await powerBiParity({ inventory, digest, scope, env, check: checked });
   const limitations = asArray(review.limitations);
   const unverified = asArray(review.unverified);
   log.info('review', `Gemini review: ${review.status}. ${limitations.length} limitation(s), ${unverified.length} unverified behavior(s).`);
@@ -1047,7 +1062,19 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
   const requestedPort = Number(port ?? env.HC_PORT ?? 8765);
   let server, url;
   try {
-    ({ server, url } = await startReportServer({ dynamicDir: scope.dynamicDir, backend, inventory, port: Number.isInteger(requestedPort) && requestedPort > 0 && requestedPort < 65536 ? requestedPort : 8765, limit: QUERY_ROW_LIMIT, queryTimeoutMs: minutesSetting(env, 'HC_QUERY_TIMEOUT_MINUTES', 1.5) + 30_000, log, redact }));
+    ({ server, url } = await startReportServer({
+      dynamicDir: scope.dynamicDir, backend, inventory, port: Number.isInteger(requestedPort) && requestedPort > 0 && requestedPort < 65536 ? requestedPort : 8765,
+      limit: QUERY_ROW_LIMIT, queryTimeoutMs: minutesSetting(env, 'HC_QUERY_TIMEOUT_MINUTES', 1.5) + 30_000, log, redact,
+      status: () => ({ parity: parity ? { checkedAt: parity.checkedAt, summary: parity.summary, visuals: parity.results.map(({ visualId, title, type, page, status, reason, differences }) => ({ visualId, title, type, page, status, reason, firstDifference: differences?.[0] ?? null })) } : null }),
+      // Refresh: a new backend instance, so nothing the old one cached survives.
+      reloadBackend: async () => {
+        const next = await loadBackend({ backendFile, root, inputDir, env, inventory, digest, onPoolError: error => log.warn('server', `A PostgreSQL connection dropped and will be reopened on the next request: ${redact(error?.message ?? String(error))}`) });
+        const previous = backend;
+        backend = next;
+        closeBackend(previous).catch(() => {});
+        return next;
+      }
+    }));
   } catch (error) {
     await closeBackend(backend);
     throw new ConversionError(error.message, { phase: 'serve', hint: 'Close other report windows (Ctrl+C) or set HC_PORT in gemini/.env to a free port.' });
@@ -1059,8 +1086,62 @@ export async function runLiveReport({ preflightOnly = false, invokeGemini = true
   log.info(null, `REPORT READY: ${url}`);
   log.info(null, `Open the address above in the browser; the HTML file alone cannot load data. Files: ${scope.dynamicDir}`);
   log.info(null, 'Credentials stay in this local server. Press Ctrl+C in this window to stop it.');
+  if (parity?.summary) {
+    const { match, mismatch, notCompared, total } = parity.summary;
+    (mismatch ? log.warn : log.info)(null, `Power BI comparison: ${match} of ${total} visual(s) match Power BI Desktop${mismatch ? `, ${mismatch} still DIFFER (marked in the report)` : ''}${notCompared ? `, ${notCompared} not compared` : ''}.`);
+  } else log.warn(null, 'The numbers were not compared with Power BI (Power BI Desktop was not open with this report). Open the .pbip in Power BI Desktop and rerun .\\setup.ps1 to compare and fix them.');
   log.info(null, '============================================================');
-  return { inventory, review, server, url };
+  return { inventory, review, server, url, parity };
+}
+
+function withoutRows(visuals) {
+  return (visuals ?? []).map(({ rows, ...rest }) => rest);
+}
+
+// Compares every data visual with Power BI Desktop's own engine (the report's .pbip must
+// be open in Desktop). Returns null when no comparison is possible, else
+// { checkedAt, results, summary, fixable } and writes work/.../live-parity.json.
+async function powerBiParity({ inventory, digest, scope, env, check }) {
+  const parityFile = path.join(scope.workDir, 'live-parity.json');
+  if (env.HC_PBI_COMPARE === 'false') { log.info('parity', 'The comparison with Power BI Desktop is turned off (HC_PBI_COMPARE=false).'); return null; }
+  if (process.platform !== 'win32' && !env.HC_PBI_PORT) return null;
+  const instances = findDesktopInstances(env);
+  const alive = [];
+  for (const instance of instances) if (env.HC_PBI_QUERY_RUNNER || await portAnswers(instance.port)) alive.push(instance);
+  if (!alive.length) {
+    log.warn('parity', `Power BI Desktop is not open, so the report's numbers were NOT compared with Power BI. To compare them and let Gemini fix every difference: open ${inventory.project} in Power BI Desktop, click Refresh there, leave it open, and rerun .\\setup.ps1 with the same choice (finished work is reused).`);
+    writeJson(parityFile, { checked: false, reason: 'Power BI Desktop was not open', checkedAt: new Date().toISOString() });
+    return null;
+  }
+  const specs = parityQueries(inventory, digest);
+  const queries = specs.filter(spec => spec.dax).map(spec => ({ id: spec.visualId, dax: spec.dax, groupBy: spec.groupBy.map(item => item.queryRef), values: spec.values.map(item => item.queryRef) }));
+  log.info('parity', `Comparing ${queries.length} visual(s) with Power BI Desktop's own engine${specs.length > queries.length ? ` (${specs.length - queries.length} cannot be compared automatically)` : ''}...`);
+  const started = Date.now();
+  const truth = queries.length ? await runPowerBiQueries({ ports: alive.map(instance => instance.port), tables: (digest.model?.tables ?? []).map(table => table.name), queries, env, onLine: line => log.detail('parity', line) }) : { ok: true, results: [] };
+  if (!truth.ok) {
+    log.warn('parity', `Could not query Power BI Desktop, so the numbers were NOT compared: ${truth.error}`);
+    writeJson(parityFile, { checked: false, reason: truth.error, instances: truth.instances ?? [], checkedAt: new Date().toISOString() });
+    return null;
+  }
+  log.info('parity', `Power BI Desktop answered on port ${truth.port} in ${formatDuration(Date.now() - started)}${truth.adomd ? ` (client: ${truth.adomd})` : ''}.`);
+  const byId = new Map((truth.results ?? []).map(item => [item.id, item]));
+  const backendById = new Map((check?.visuals ?? []).map(item => [item.visualId, item]));
+  const results = specs.map(spec => compareVisual(spec, byId.get(spec.visualId), backendById.get(spec.visualId)));
+  for (const result of results) {
+    const label = `${result.type}${result.title ? ` "${result.title}"` : ''} (${result.visualId}) on "${result.page}"`;
+    if (result.status === 'match') log.info('parity', `MATCH ${label}: ${result.checkedValues} value(s) in ${result.powerBiRowCount} row(s).`);
+    else if (result.status === 'not-compared') log.info('parity', `NOT COMPARED ${label}: ${result.reason}.`);
+    else {
+      const first = result.differences?.[0];
+      log.warn('parity', `DIFFERS ${label}: ${result.reason}${first ? `; e.g. ${first.field}${Object.keys(first.row).length ? ` for ${Object.values(first.row).join(' / ')}` : ''}: Power BI ${JSON.stringify(first.powerBI)}, report ${JSON.stringify(first.report)}${first.hint ? ` (${first.hint})` : ''}` : ''}.`);
+    }
+  }
+  const summary = paritySummary(results);
+  const checkedAt = new Date().toISOString();
+  writeJson(parityFile, { checked: true, checkedAt, port: truth.port, summary, results });
+  log.info('parity', `Power BI comparison: ${summary.match} match, ${summary.mismatch} differ, ${summary.notCompared} not compared. Details: ${rel(parityFile)}`);
+  if (summary.mismatch) log.info('parity', 'Power BI Desktop compares with the data of its last refresh; if the sources changed since then, click Refresh in Desktop so differences come only from the report.');
+  return { checkedAt, results, summary, fixable: results.filter(item => item.status === 'mismatch') };
 }
 
 function currentReview(scope, state) {
